@@ -10,6 +10,9 @@
   "packageManager": "pnpm@9.15.0",
   "scripts": {
     "dev:template": "pnpm --filter @apps/template dev",
+    "dev:central-hub": "pnpm --filter @apps/central-hub dev",
+    "dev:marketing": "pnpm --filter @apps/marketing dev",
+    "dev:finance": "pnpm --filter @apps/finance dev",
     "dev:inference-gateway": "pnpm --filter @services/inference-gateway dev",
     "build": "pnpm -r build",
     "lint": "pnpm -r lint",

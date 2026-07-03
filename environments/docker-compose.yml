@@ -14,6 +14,9 @@ services:
     depends_on:
       - inference-gateway
       - app-template
+      - app-central-hub
+      - app-marketing
+      - app-finance
     networks:
       - centralhub
 
@@ -33,11 +36,38 @@ services:
 
   # --- App: _template -------------------------------------------------------
   # To add a new app: copy this service block, point `dockerfile` at the new
-  # app's Dockerfile, give it a unique service name, and add a matching
-  # `location` block in gateway/conf.d/default.conf.
+  # app's Dockerfile, give it a unique service name (app-<name>, matching the
+  # gateway's dynamic /apps/<name>/ routing), and add it to gateway's
+  # depends_on above. No Nginx changes needed.
   app-template:
     build:
       context: ..
       dockerfile: apps/_template/Dockerfile
+    networks:
+      - centralhub
+
+  # --- App: central-hub -------------------------------------------------
+  # Served at the gateway root (/), not /apps/central-hub/ — see
+  # apps/central-hub/vite.config.ts for why.
+  app-central-hub:
+    build:
+      context: ..
+      dockerfile: apps/central-hub/Dockerfile
+    networks:
+      - centralhub
+
+  # --- App: marketing -----------------------------------------------------
+  app-marketing:
+    build:
+      context: ..
+      dockerfile: apps/marketing/Dockerfile
+    networks:
+      - centralhub
+
+  # --- App: finance -------------------------------------------------------
+  app-finance:
+    build:
+      context: ..
+      dockerfile: apps/finance/Dockerfile
     networks:
       - centralhub
