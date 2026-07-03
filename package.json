@@ -14,6 +14,7 @@
     "dev:marketing": "pnpm --filter @apps/marketing dev",
     "dev:finance": "pnpm --filter @apps/finance dev",
     "dev:inference-gateway": "pnpm --filter @services/inference-gateway dev",
+    "dev:auth-gateway": "pnpm --filter @services/auth-gateway dev",
     "build": "pnpm -r build",
     "lint": "pnpm -r lint",
     "stack:up": "docker compose -f environments/docker-compose.yml --env-file environments/.env up --build",

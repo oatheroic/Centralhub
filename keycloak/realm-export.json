@@ -1,0 +1,78 @@
+{
+  "realm": "centralhub",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "displayName": "CentralHub",
+  "displayNameHtml": "<span style=\"font-weight:600\">CentralHub</span>",
+  "loginTheme": "centralhub",
+  "roles": {
+    "realm": [
+      { "name": "admin", "description": "Full administrative access to CentralHub." },
+      { "name": "user", "description": "Standard authenticated CentralHub user." }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "auth-gateway",
+      "name": "CentralHub Auth Gateway",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "dev-only-change-me-auth-gateway-secret",
+      "redirectUris": ["http://localhost:8080/auth/callback"],
+      "webOrigins": [],
+      "fullScopeAllowed": true,
+      "attributes": {
+        "post.logout.redirect.uris": "http://localhost:8080/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "realm roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "multivalued": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "dev-admin",
+      "email": "dev-admin@centralhub.local",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Dev",
+      "lastName": "Admin",
+      "credentials": [{ "type": "password", "value": "devadmin123", "temporary": false }],
+      "realmRoles": ["admin", "user"]
+    },
+    {
+      "username": "dev-user",
+      "email": "dev-user@centralhub.local",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Dev",
+      "lastName": "User",
+      "credentials": [{ "type": "password", "value": "devuser123", "temporary": false }],
+      "realmRoles": ["user"]
+    },
+    {
+      "username": "service-account-auth-gateway",
+      "enabled": true,
+      "serviceAccountClientId": "auth-gateway",
+      "clientRoles": { "realm-management": ["view-users"] }
+    }
+  ]
+}

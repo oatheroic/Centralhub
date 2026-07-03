@@ -45,6 +45,43 @@ importers:
         specifier: ^6.0.1
         version: 6.4.3(@types/node@22.20.0)(jiti@1.21.7)(tsx@4.23.0)
 
+  apps/admin:
+    dependencies:
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
+      react-dom:
+        specifier: ^18.3.1
+        version: 18.3.1(react@18.3.1)
+    devDependencies:
+      '@types/react':
+        specifier: ^18.3.12
+        version: 18.3.31
+      '@types/react-dom':
+        specifier: ^18.3.1
+        version: 18.3.7(@types/react@18.3.31)
+      '@vitejs/plugin-react':
+        specifier: ^4.3.4
+        version: 4.7.0(vite@6.4.3(@types/node@22.20.0)(jiti@1.21.7)(tsx@4.23.0))
+      autoprefixer:
+        specifier: ^10.4.20
+        version: 10.5.2(postcss@8.5.16)
+      eslint:
+        specifier: ^9.15.0
+        version: 9.39.4(jiti@1.21.7)
+      postcss:
+        specifier: ^8.4.49
+        version: 8.5.16
+      tailwindcss:
+        specifier: ^3.4.15
+        version: 3.4.19(tsx@4.23.0)
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vite:
+        specifier: ^6.0.1
+        version: 6.4.3(@types/node@22.20.0)(jiti@1.21.7)(tsx@4.23.0)
+
   apps/central-hub:
     dependencies:
       lucide-react:
@@ -158,6 +195,37 @@ importers:
       vite:
         specifier: ^6.0.1
         version: 6.4.3(@types/node@22.20.0)(jiti@1.21.7)(tsx@4.23.0)
+
+  services/auth-gateway:
+    dependencies:
+      cookie-parser:
+        specifier: ^1.4.7
+        version: 1.4.7
+      express:
+        specifier: ^4.21.1
+        version: 4.22.2
+      jose:
+        specifier: ^5.9.6
+        version: 5.10.0
+    devDependencies:
+      '@types/cookie-parser':
+        specifier: ^1.4.8
+        version: 1.4.10(@types/express@5.0.6)
+      '@types/express':
+        specifier: ^5.0.0
+        version: 5.0.6
+      '@types/node':
+        specifier: ^22.10.1
+        version: 22.20.0
+      eslint:
+        specifier: ^9.15.0
+        version: 9.39.4(jiti@1.21.7)
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.0
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
 
   services/inference-gateway:
     dependencies:
@@ -814,6 +882,11 @@ packages:
   '@types/connect@3.4.38':
     resolution: {integrity: sha512-K6uROf1LD88uDQqJCktA4yzL1YYAK6NgfsI0v/mTgyPKWsX1CnJ0XPSDhViejru1GcRkLWb8RlzFYJRqGUbaug==}
 
+  '@types/cookie-parser@1.4.10':
+    resolution: {integrity: sha512-B4xqkqfZ8Wek+rCOeRxsjMS9OgvzebEzzLYw7NHYuvzb7IdxOkI0ZHGgeEBX4PUM7QGVvNSK60T3OvWj3YfBRg==}
+    peerDependencies:
+      '@types/express': '*'
+
   '@types/estree@1.0.9':
     resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
 
@@ -988,6 +1061,13 @@ packages:
 
   convert-source-map@2.0.0:
     resolution: {integrity: sha512-Kvp459HrV2FEJ1CAsi1Ku+MY3kasH19TFykTz2xWmMeq6bk2NU3XXvfJ+Q61m0xktWwt+1HSYf3JZsTms3aRJg==}
+
+  cookie-parser@1.4.7:
+    resolution: {integrity: sha512-nGUvgXnotP3BsjiLX2ypbQnWoGUPIIfHQNZkkC668ntrzGWEZVW70HDEB1qnNGMicPje6EttlIgzo51YSwNQGw==}
+    engines: {node: '>= 0.8.0'}
+
+  cookie-signature@1.0.6:
+    resolution: {integrity: sha512-QADzlaHc8icV8I7vbaJXJwod9HWYp8uCqf1xa4OfNu1T7JVxQIrUgOWtHdNDtPiywmFbiS12VjotIXLrKM3orQ==}
 
   cookie-signature@1.0.7:
     resolution: {integrity: sha512-NXdYc3dLr47pBkpUCHtKSwIOQXLVn8dZEuywboCOJY/osA0wFSLlSawr3KN8qXJEyX66FcONTH8EIlVuK0yyFA==}
@@ -1299,6 +1379,9 @@ packages:
   jiti@1.21.7:
     resolution: {integrity: sha512-/imKNG4EbWNrVjoNC/1H5/9GFy+tqjGBHCaSsN+P2RnPqjsLmv6UD3Ej+Kj8nBWaRAwyk7kK5ZUc+OEatnTR3A==}
     hasBin: true
+
+  jose@5.10.0:
+    resolution: {integrity: sha512-s+3Al/p9g32Iq+oqXxkW//7jk2Vig6FF1CFqzVXoTUXt2qz89YWbL+OwS17NFYEvxC35n0FKeGO2LGYSxeM2Gg==}
 
   js-tokens@4.0.0:
     resolution: {integrity: sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==}
@@ -2284,6 +2367,10 @@ snapshots:
     dependencies:
       '@types/node': 22.20.0
 
+  '@types/cookie-parser@1.4.10(@types/express@5.0.6)':
+    dependencies:
+      '@types/express': 5.0.6
+
   '@types/estree@1.0.9': {}
 
   '@types/express-serve-static-core@5.1.1':
@@ -2479,6 +2566,13 @@ snapshots:
   content-type@1.0.5: {}
 
   convert-source-map@2.0.0: {}
+
+  cookie-parser@1.4.7:
+    dependencies:
+      cookie: 0.7.2
+      cookie-signature: 1.0.6
+
+  cookie-signature@1.0.6: {}
 
   cookie-signature@1.0.7: {}
 
@@ -2851,6 +2945,8 @@ snapshots:
   isexe@2.0.0: {}
 
   jiti@1.21.7: {}
+
+  jose@5.10.0: {}
 
   js-tokens@4.0.0: {}
 

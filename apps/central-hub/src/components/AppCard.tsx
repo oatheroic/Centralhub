@@ -1,11 +1,11 @@
 import type { AppRegistryEntry } from "../registry/apps";
-import { mockUser, setHandoffCookie } from "../lib/session";
 
 export function AppCard({ app }: { app: AppRegistryEntry }) {
   const Icon = app.icon;
 
   function handleOpen() {
-    setHandoffCookie(mockUser);
+    // Real session cookies (chub_session) travel automatically on any
+    // same-origin navigation — no manual cookie-setting needed anymore.
     window.location.href = app.path;
   }
 

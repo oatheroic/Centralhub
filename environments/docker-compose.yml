@@ -4,6 +4,9 @@ networks:
   centralhub:
     driver: bridge
 
+volumes:
+  pgdata: {}
+
 services:
   gateway:
     build:
@@ -13,10 +16,61 @@ services:
       - "${GATEWAY_PORT:-8080}:80"
     depends_on:
       - inference-gateway
+      - auth-gateway
       - app-template
       - app-central-hub
       - app-marketing
       - app-finance
+      - app-admin
+    networks:
+      - centralhub
+
+  # --- Postgres: backs Keycloak's own storage. A future fine-grained
+  # permissions-service phase can add tables to this same instance without
+  # introducing a new DB engine. ------------------------------------------
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - centralhub
+
+  # --- Keycloak: identity provider. NOT proxied through the main gateway —
+  # it publishes its own host port so the browser can reach its hosted login
+  # page directly; reverse-proxying Keycloak under an Nginx path prefix is a
+  # well-known operational pain point. Boots with --import-realm against the
+  # mounted realm-export.json, so `docker compose up` needs zero manual
+  # console setup (realm, roles, client, seed users all pre-provisioned).
+  # KC_HOSTNAME/_PORT/_STRICT pin a single issuer regardless of whether a
+  # request arrives via localhost:${KEYCLOAK_PORT} (browser) or the internal
+  # Docker DNS name keycloak:8080 (auth-gateway) — without this, token
+  # issuer verification would break depending on which path served a given
+  # request. See README "Pillar 4" for the full explanation.
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://db:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      KC_HOSTNAME: localhost
+      KC_HOSTNAME_PORT: ${KEYCLOAK_PORT:-8081}
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+    volumes:
+      - ../keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+      - ../keycloak/themes/centralhub:/opt/keycloak/themes/centralhub:ro
+    ports:
+      - "${KEYCLOAK_PORT:-8081}:8080"
+    depends_on:
+      - db
     networks:
       - centralhub
 
@@ -31,6 +85,26 @@ services:
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-5}
       LOCAL_MODEL_BASE_URL: ${LOCAL_MODEL_BASE_URL:-}
       LOCAL_MODEL_NAME: ${LOCAL_MODEL_NAME:-}
+    networks:
+      - centralhub
+
+  # --- Auth gateway: OIDC relying party for Keycloak, and the target of
+  # Nginx's auth_request sub-requests (see gateway/conf.d/default.conf).
+  auth-gateway:
+    build:
+      context: ..
+      dockerfile: services/auth-gateway/Dockerfile
+    environment:
+      PORT: 4100
+      KEYCLOAK_INTERNAL_URL: http://keycloak:8080
+      KEYCLOAK_PUBLIC_URL: http://localhost:${KEYCLOAK_PORT:-8081}
+      GATEWAY_PUBLIC_URL: http://localhost:${GATEWAY_PORT:-8080}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-centralhub}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-auth-gateway}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
+      AUTH_SESSION_SECRET: ${AUTH_SESSION_SECRET}
+    depends_on:
+      - keycloak
     networks:
       - centralhub
 
@@ -69,5 +143,17 @@ services:
     build:
       context: ..
       dockerfile: apps/finance/Dockerfile
+    networks:
+      - centralhub
+
+  # --- App: admin -----------------------------------------------------------
+  # Deliberately excluded from apps/central-hub/src/registry/apps.ts — never
+  # linked in the UI. Protection is the Nginx admin-role auth_request gate on
+  # ^/apps/admin/(.*)$, not obscurity; a discovered URL still 401/403s
+  # without valid admin credentials.
+  app-admin:
+    build:
+      context: ..
+      dockerfile: apps/admin/Dockerfile
     networks:
       - centralhub

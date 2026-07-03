@@ -1,10 +1,16 @@
+import { useEffect, useState } from "react";
 import { appRegistry } from "./registry/apps";
-import { mockUser } from "./lib/session";
+import { fetchSession, type SessionUser } from "./lib/auth";
 import { IdentityBanner } from "./components/IdentityBanner";
 import { AppCard } from "./components/AppCard";
 
 export default function App() {
+  const [user, setUser] = useState<SessionUser | null | undefined>(undefined);
   const apps = appRegistry.filter((a) => !a.hidden);
+
+  useEffect(() => {
+    fetchSession().then(setUser);
+  }, []);
 
   return (
     <main className="min-h-screen bg-slate-950 p-8 text-slate-100">
@@ -14,7 +20,7 @@ export default function App() {
           <p className="text-slate-400">Entry point for every department mini-app.</p>
         </header>
 
-        <IdentityBanner user={mockUser} />
+        {user && <IdentityBanner user={user} />}
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {apps.map((app) => (

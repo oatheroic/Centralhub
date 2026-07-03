@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
-import { readHandoffCookie, type HandoffUser } from "./lib/readHandoffCookie";
+
+type SessionUser = { name: string; email: string };
 
 export default function App() {
-  const [user, setUser] = useState<HandoffUser | null | undefined>(undefined);
+  const [user, setUser] = useState<SessionUser | null | undefined>(undefined);
 
   useEffect(() => {
-    setUser(readHandoffCookie());
+    fetch("/auth/me", { credentials: "same-origin" })
+      .then((res) => (res.ok ? (res.json() as Promise<SessionUser>) : null))
+      .then(setUser);
   }, []);
 
   return (
@@ -16,8 +19,8 @@ export default function App() {
         {user === undefined
           ? "checking session..."
           : user
-            ? `Handed off from Central Hub as ${user.name} (${user.role})`
-            : "No hub session detected — opened directly"}
+            ? `Logged in as ${user.name} (${user.email})`
+            : "No session detected"}
       </p>
     </main>
   );
