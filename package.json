@@ -1,0 +1,20 @@
+{
+  "name": "centralhub",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Enterprise App Factory - local-first monorepo for departmental mini-apps",
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "dev:template": "pnpm --filter @apps/template dev",
+    "dev:inference-gateway": "pnpm --filter @services/inference-gateway dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "stack:up": "docker compose -f environments/docker-compose.yml --env-file environments/.env up --build",
+    "stack:down": "docker compose -f environments/docker-compose.yml down",
+    "stack:logs": "docker compose -f environments/docker-compose.yml logs -f"
+  }
+}

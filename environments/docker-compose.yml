@@ -1,0 +1,43 @@
+name: centralhub
+
+networks:
+  centralhub:
+    driver: bridge
+
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: gateway/Dockerfile
+    ports:
+      - "${GATEWAY_PORT:-8080}:80"
+    depends_on:
+      - inference-gateway
+      - app-template
+    networks:
+      - centralhub
+
+  inference-gateway:
+    build:
+      context: ..
+      dockerfile: services/inference-gateway/Dockerfile
+    environment:
+      PORT: 4000
+      INFERENCE_PROVIDER: ${INFERENCE_PROVIDER:-claude}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-5}
+      LOCAL_MODEL_BASE_URL: ${LOCAL_MODEL_BASE_URL:-}
+      LOCAL_MODEL_NAME: ${LOCAL_MODEL_NAME:-}
+    networks:
+      - centralhub
+
+  # --- App: _template -------------------------------------------------------
+  # To add a new app: copy this service block, point `dockerfile` at the new
+  # app's Dockerfile, give it a unique service name, and add a matching
+  # `location` block in gateway/conf.d/default.conf.
+  app-template:
+    build:
+      context: ..
+      dockerfile: apps/_template/Dockerfile
+    networks:
+      - centralhub
