@@ -18,6 +18,19 @@ export type AdminUser = {
   roles: string[];
 };
 
+export async function findUserSubByUsername(username: string): Promise<string | null> {
+  const token = await clientCredentialsToken();
+  const res = await fetch(
+    `${keycloakEndpoints.adminUsers}?username=${encodeURIComponent(username)}&exact=true`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (!res.ok) {
+    throw new Error(`Keycloak admin user lookup failed: ${res.status}`);
+  }
+  const users = (await res.json()) as KeycloakUser[];
+  return users[0]?.id ?? null;
+}
+
 export async function listUsers(): Promise<AdminUser[]> {
   const token = await clientCredentialsToken();
   const headers = { Authorization: `Bearer ${token}` };

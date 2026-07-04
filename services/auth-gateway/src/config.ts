@@ -23,6 +23,11 @@ export const config = {
   clientSecret: requireEnv("KEYCLOAK_CLIENT_SECRET"),
 
   sessionSecret: requireEnv("AUTH_SESSION_SECRET"),
+
+  // Reuses the same Postgres instance/credentials that already back
+  // Keycloak — see README "Pillar 4" for why this doesn't warrant a
+  // separate database engine or container.
+  databaseUrl: requireEnv("DATABASE_URL"),
 };
 
 export const keycloakEndpoints = {

@@ -103,8 +103,12 @@ services:
       KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-auth-gateway}
       KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
       AUTH_SESSION_SECRET: ${AUTH_SESSION_SECRET}
+      # Reuses the db service/credentials that already back Keycloak — see
+      # README "Pillar 4" for why this doesn't warrant a separate database.
+      DATABASE_URL: postgres://keycloak:${POSTGRES_PASSWORD}@db:5432/keycloak
     depends_on:
       - keycloak
+      - db
     networks:
       - centralhub
 
