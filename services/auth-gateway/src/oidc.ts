@@ -16,6 +16,16 @@ export function buildAuthorizeUrl(state: string): string {
   url.searchParams.set("response_type", "code");
   url.searchParams.set("scope", "openid profile email");
   url.searchParams.set("state", state);
+  // Forces a real credential check every time, even if Keycloak still has
+  // a live SSO cookie from an earlier login. Without this, a revoked
+  // chub_session (§8 — role revoked, or an admin's "Revoke session")
+  // silently re-authenticates for free the moment the user hits
+  // /auth/login, completely undoing the revocation. auth-gateway is
+  // Keycloak's only client in this realm, so there's no multi-app SSO
+  // convenience being given up — every /auth/login here should mean "the
+  // caller doesn't have a valid session," so a credential prompt is always
+  // the correct behavior, not a regression.
+  url.searchParams.set("prompt", "login");
   return url.toString();
 }
 
@@ -70,6 +80,27 @@ export async function completeLogin(code: string): Promise<{
     // session to kill) — never used for authorization decisions.
     idToken: tokens.id_token,
   };
+}
+
+const BACKCHANNEL_LOGOUT_EVENT = "http://schemas.openid.net/event/backchannel-logout";
+
+// Verifies a Keycloak-signed logout_token sent to our backchannel-logout
+// endpoint (server-to-server, over the Docker network — never through
+// Nginx or a browser). Reuses the same JWKS as ID token verification,
+// since both are signed by the realm's own key. Per the OIDC Backchannel
+// Logout spec, a valid logout_token must carry a `sub` and an `events`
+// claim containing the backchannel-logout event key.
+export async function verifyLogoutToken(token: string): Promise<{ sub: string }> {
+  const { payload } = await jwtVerify(token, jwks, {
+    issuer: keycloakEndpoints.issuer,
+    audience: config.clientId,
+  });
+  const sub = payload.sub;
+  const events = payload.events as Record<string, unknown> | undefined;
+  if (typeof sub !== "string" || !events || !(BACKCHANNEL_LOGOUT_EVENT in events)) {
+    throw new Error("logout_token missing sub or backchannel-logout event claim");
+  }
+  return { sub };
 }
 
 export async function clientCredentialsToken(): Promise<string> {

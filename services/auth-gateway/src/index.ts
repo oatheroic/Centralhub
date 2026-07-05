@@ -9,11 +9,16 @@ import { sessionRouter } from "./routes/session.js";
 import { logoutRouter } from "./routes/logout.js";
 import { adminUsersRouter } from "./routes/adminUsers.js";
 import { adminPermissionsRouter } from "./routes/adminPermissions.js";
+import { adminSessionsRouter } from "./routes/adminSessions.js";
+import { backchannelLogoutRouter } from "./routes/backchannelLogout.js";
 import { deniedRouter } from "./routes/denied.js";
 
 const app = express();
 app.use(cookieParser());
 app.use(express.json());
+// Keycloak's backchannel-logout POST is form-urlencoded per the OIDC spec
+// (a `logout_token` field), not JSON.
+app.use(express.urlencoded({ extended: false }));
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
@@ -25,6 +30,8 @@ app.use(sessionRouter);
 app.use(logoutRouter);
 app.use(adminUsersRouter);
 app.use(adminPermissionsRouter);
+app.use(adminSessionsRouter);
+app.use(backchannelLogoutRouter);
 app.use(deniedRouter);
 
 async function start() {

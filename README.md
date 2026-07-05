@@ -18,7 +18,8 @@ small, mechanical, well-documented change — never a rearchitecture.
 | 2 | Central Hub landing dashboard + component discovery | Done |
 | 3 | Real authentication (Keycloak + auth-gateway) + admin gate | Done |
 | 4 | Granular per-app RBAC (read/write/edit/delete) | Done (foundational) |
-| — | Real per-app backends, production hardening | Not started (see §10) |
+| 5 | Instant session/role revocation | Done |
+| — | Real per-app backends, production hardening | Not started (see §11) |
 
 ---
 
@@ -59,7 +60,7 @@ CentralHub/
 | 1 — Workspace layout | `apps/` | Isolated, independently deployable frontend packages |
 | 2 — Traffic gateway | `gateway/` | Single entrypoint; zero-edit dynamic app routing |
 | 3 — Environment portability | `environments/` | One `docker compose up`, no cloud control plane |
-| 4 — Authentication & RBAC | `keycloak/`, `services/auth-gateway/` | Real login, role gate, per-app permissions |
+| 4 — Authentication & RBAC | `keycloak/`, `services/auth-gateway/` | Real login, role gate, per-app permissions, instant revocation |
 
 ---
 
@@ -78,7 +79,7 @@ CentralHub/
      `vite.config.ts`.
   3. Add a service entry to `environments/docker-compose.yml` (mirror `app-template`).
   4. Add it to `apps/central-hub/src/registry/apps.ts` (dashboard card) and the
-     table in §8 below.
+     table in §9 below.
   5. If it needs RBAC (§7), also add its id to `KNOWN_APPS` in
      `services/auth-gateway/src/permissions.ts` and copy in `usePermissions.ts`.
   - **No Nginx changes needed** for any of the above — see Pillar 2.
@@ -132,7 +133,8 @@ CentralHub/
   - `/apps/admin/` additionally requires the `admin` realm role
     (`/session/verify-admin`).
 - **Status**: done (Phase 3), hardened in Phase 4 (permission-denied page,
-  bfcache fix, SSO logout fix — see notes below).
+  bfcache fix, SSO logout fix — see notes below) and Phase 5 (§8: the session
+  JWT below is now identity-only; roles and revocation are checked live).
 - **Demo / bootstrap data** (seeded by `keycloak/realm-export.json`,
   **dev-only, must be replaced before any real deployment**):
   - `dev-admin` / `devadmin123` — `admin` + `user` realm roles.
@@ -154,8 +156,11 @@ CentralHub/
     — CSS-only override via `theme.properties`, form structure/behavior
     untouched.
 - **Deferred / not built**: MFA, password reset flows, self-service
-  registration (`registrationAllowed: false`), refresh-token rotation (session
-  cookie is a flat 8h JWT, no silent renewal).
+  registration (`registrationAllowed: false`). Refresh-token rotation /
+  silent renewal was considered and deliberately **not** built — see §8: once
+  authorization is re-checked live on every request instead of trusted from
+  the JWT, a short-lived-JWT-plus-refresh scheme stops solving a real
+  problem, since instant revocation is achieved a different way.
 
 ---
 
@@ -237,7 +242,107 @@ CentralHub/
 
 ---
 
-## 8. Apps in this repo
+## 8. Pillar 4c — Instant session/role revocation
+
+- **Objective**: eliminate delayed permission/role enforcement caused by the
+  session cookie's flat 8h lifetime, without a cache layer, without putting
+  Keycloak on the hot path of every request, and without Nginx doing anything
+  but forwarding.
+- **The actual problem, precisely scoped**: per-app `read`/`write`/`edit`/
+  `delete` (§7) was already instant — it re-queries Postgres every request.
+  Two things genuinely were frozen for a session's whole 8h life: (1) Keycloak
+  **realm roles** baked into the JWT at login (revoking `admin` had no effect
+  until re-login), and (2) there was **no way to kill a specific live session**
+  before its natural expiry. A third, procedural gap: changes made directly in
+  Keycloak's own console had no channel back to `auth-gateway`.
+- **Architecture** — extends the same live-Postgres-per-request pattern
+  already proven for `app_permissions`, rather than introducing Redis (solves
+  a latency problem that doesn't exist here) or per-request Keycloak
+  introspection (would make Keycloak a bottleneck for all traffic, not just
+  login):
+  - **`user_roles`** (`user_sub`, `role`) mirrors Keycloak's realm roles,
+    refreshed at login (`syncRolesFromKeycloak()` in `services/auth-gateway/src/roles.ts`,
+    called from `routes/callback.ts`). This — not the JWT — is now the sole
+    authorization source of truth for role checks (`hasRole()`,
+    `getRoles()`); `chub_session` was shrunk back down to identity-only
+    (`sub`/`name`/`email` — see `session.ts`'s `SessionInput`/`SessionClaims`).
+  - **`session_revocations`** (`user_sub`, `revoked_before`) — absent row =
+    never revoked. `isRevoked(sub, issuedAt)` in `services/auth-gateway/src/revocation.ts`
+    rejects any session whose JWT `iat` predates the stored timestamp.
+    Deliberately **per-user, not per-session/`jti`**: nothing in this system
+    lists individual concurrent sessions, so "kill this user's session" in
+    practice means "kill all of that user's current sessions" — a `jti` table
+    would add unbounded row growth and a reaper job for precision with no UI
+    to use it.
+  - Both checks run inside `resolveSession()` (`routes/session.ts`), called by
+    every gated route (`/session/verify`, `/session/verify-admin`,
+    `/session/verify-permission`, `/me`, `/permissions`) and by
+    `requireSession`/`requireAdmin` (`middleware/requireAdmin.ts`). **No
+    changes to `gateway/conf.d/default.conf`** — Nginx still just forwards to
+    `/session/verify` via `auth_request`, unaware any of this exists.
+  - **Admin force-logout**: `apps/admin`'s user table has a "Revoke session"
+    button per user, calling `PUT /auth/admin/sessions/:userSub/revoke`
+    (`routes/adminSessions.ts`) → `revokeUser()`. Takes effect on that user's
+    very next request, anywhere. **Self-revocation is blocked** — both
+    server-side (400) and by hiding the button on the logged-in admin's own
+    row — since there's no recovery path in this UI if an admin locked
+    themselves out.
+  - **Keycloak backchannel logout** (event-driven, not polled — built into
+    Keycloak, configured via the `auth-gateway` client's
+    `backchannel.logout.url` attribute in `realm-export.json`): when an admin
+    ends a user's session via Keycloak's own console (Users → Sessions →
+    Logout, or the equivalent Admin REST call), Keycloak POSTs a signed
+    `logout_token` to `POST /backchannel-logout` (`routes/backchannelLogout.ts`,
+    verified via `verifyLogoutToken()` in `oidc.ts`) → `revokeUser()`. This
+    route is deliberately public and outside Nginx's `auth_request` gate —
+    Keycloak calls it server-to-server over the Docker network, no browser
+    or cookie involved.
+- **Status**: done (Phase 5) — role checks, force-logout, and the
+  backchannel-logout webhook are all wired and verified end-to-end.
+- **A revoked/unverifiable session is modeled as 401, not 403.** 403 means
+  "valid session, but not permitted THIS resource" — app read-denied or
+  admin-role-missing — and Nginx's `@permission_denied` page for that
+  correctly sends the user back to the dashboard. A revoked session has no
+  such remedy (the dashboard itself is what just denied them — redirecting
+  there again would loop), so it's treated the same as "no session at all":
+  401, which every gated Nginx location already auto-redirects to
+  `/auth/login` via the pre-existing `@login_redirect` wiring, no Nginx
+  changes needed. `resolveSession()` (`routes/session.ts`) fails closed the
+  same way (401) on a DB error during the revocation check itself. Role/
+  permission-check failures that *aren't* about revocation (`hasRole` for
+  the admin gate, `getPermission`) still fail closed as 403, since those
+  really are "valid session, this specific thing is denied" — going back to
+  the dashboard is a real remedy there.
+- **Revoking a session doesn't silently un-revoke itself via Keycloak SSO.**
+  `/auth/login`'s authorize URL (`buildAuthorizeUrl()` in `oidc.ts`) sets
+  `prompt=login`, forcing a real credential check every time — without it,
+  a revoked `chub_session` redirecting to `/auth/login` would immediately
+  get a fresh, valid one for free from Keycloak's still-live SSO cookie,
+  completely undoing the revocation. Since `auth-gateway` is Keycloak's only
+  client in this realm, there's no multi-app SSO convenience being traded
+  away.
+- Every DB call added or touched in this phase (`isRevoked`, `hasRole`, and
+  the pre-existing `getPermission`/`getMatrix`) is wrapped in try/catch and
+  logs a tagged error, so a policy denial is distinguishable from a
+  DB-outage denial in logs — a strict improvement over the pre-Phase-5
+  behavior, where an unguarded `pool.query()` failure was an unhandled
+  promise rejection (Express 4.21 does not auto-catch async-handler errors)
+  that could crash the process outright instead of cleanly denying one
+  request.
+- **Documented, accepted limitations** (operator guidance, not silent gaps):
+  - Disabling a user in Keycloak's console, by itself, does **not** end
+    their live SSO session or fire backchannel logout — only the Sessions
+    tab's explicit "Logout" action (or the Admin REST logout endpoint) does.
+  - A role change made directly in Keycloak's console **without** an
+    accompanying session logout isn't picked up until that user's JWT
+    naturally expires or an admin explicitly force-logs them out (via the
+    `apps/admin` button, or Keycloak's own console). There is no background
+    poller re-syncing roles for still-active sessions — see the deferred
+    item in §11.
+
+---
+
+## 9. Apps in this repo
 
 | App | Package | URL | Purpose |
 |---|---|---|---|
@@ -245,7 +350,7 @@ CentralHub/
 | `apps/central-hub` | `@apps/central-hub` | `/` (gateway root) | Landing dashboard; discovers apps via `src/registry/apps.ts`, shows the real logged-in user via `/auth/me`. |
 | `apps/marketing` | `@apps/marketing` | `/apps/marketing/` | Placeholder department app; demo RBAC-guarded "Save campaign" action. |
 | `apps/finance` | `@apps/finance` | `/apps/finance/` | Placeholder department app; demo RBAC-guarded "Approve budget" action. |
-| `apps/admin` | `@apps/admin` | `/apps/admin/` | Keycloak user list + permissions matrix editor (§7). Not in the registry above — never linked in the UI — but that's a minor bonus, not the real protection: the `admin`-role Nginx gate is what actually stops access. |
+| `apps/admin` | `@apps/admin` | `/apps/admin/` | Keycloak user list (with a per-user "Revoke session" action, §8) + permissions matrix editor (§7). Not in the registry above — never linked in the UI — but that's a minor bonus, not the real protection: the `admin`-role Nginx gate is what actually stops access. |
 
 This table is maintained by hand alongside `apps/central-hub/src/registry/apps.ts`
 and `services/auth-gateway/src/permissions.ts`'s `KNOWN_APPS` — update all three
@@ -253,7 +358,7 @@ when adding or removing an app.
 
 ---
 
-## 9. The inference swap
+## 10. The inference swap
 
 - **Objective**: moving from cloud Claude to a local model must be an env
   change, never a code change.
@@ -267,24 +372,25 @@ when adding or removing an app.
 
 ---
 
-## 10. Deferred / not started (catalog)
+## 11. Deferred / not started (catalog)
 
 Consolidated from the sections above, so it's checkable in one place:
 
 | Item | Where it would live | Why deferred |
 |---|---|---|
 | MFA / password reset / self-registration | Keycloak realm config | Out of scope for a local dev foundational slice |
-| Session refresh / silent renewal | `services/auth-gateway` | Flat 8h JWT is sufficient for current usage |
 | Real mutating backend per app | each `apps/<name>` | No app has real data to mutate yet — demo actions are local state only |
 | Server-side enforcement of write/edit/delete | app-specific backend, calling `/session/verify-permission` | Nothing to enforce until an app has a real endpoint |
 | Per-record / field-level permissions | `app_permissions` table design | Current granularity is per (user, app) only |
 | Bulk permission grants | `apps/admin` Permissions panel | One-cell-at-a-time editing was sufficient for the current user count |
-| Audit log of permission changes | new table + admin UI | Not needed until multiple admins manage grants |
+| Audit log of permission/role changes | new table + admin UI | Not needed until multiple admins manage grants |
+| Background role re-sync poller | `services/auth-gateway` | Would shrink the §8 console-role-change gap from "needs a manual force-logout" to "auto-corrects in ~1 min"; adds recurring Keycloak Admin API load for a low-frequency edge case that already has a manual remedy |
+| Per-session (`jti`) tracking / "your active sessions" UI | `session_revocations` table design | Current granularity is per-user (kill all sessions), not per-device — see §8 |
 | Production-safe credentials | `keycloak/realm-export.json`, `.env` | `dev-admin`/`dev-user`/client secret are dev-only seed data — see §6, §7 |
 
 ---
 
-## 11. Quickstart
+## 12. Quickstart
 
 ```sh
 pnpm install
@@ -299,4 +405,9 @@ pnpm stack:up
 # log in as dev-user / devuser123 to see RBAC in action: full access to
 # Marketing, a friendly "Access denied" page on Finance and Admin, and a
 # window.alert() if you try an action beyond your granted verbs
+
+# to see instant revocation (§8): while dev-user has an active session in
+# another browser/tab, click "Revoke session" next to them in
+# /apps/admin/'s user list as dev-admin — their very next request anywhere
+# gets a 403, no waiting for the 8h session to expire
 ```

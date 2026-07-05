@@ -29,7 +29,15 @@ adminPermissionsRouter.put(
       edit: boolean;
       delete: boolean;
     }>;
-    await upsertPermission(userSub, appId, { read, write, edit, delete: del });
-    res.sendStatus(204);
+    try {
+      await upsertPermission(userSub, appId, { read, write, edit, delete: del });
+      res.sendStatus(204);
+    } catch (err) {
+      // Not an authz decision (the caller already passed requireAdmin) —
+      // just report the write failure so the admin UI's optimistic update
+      // rolls back, consistent with GET /admin/permissions's existing 502.
+      console.error("auth-gateway: permission upsert failed", err);
+      res.status(502).json({ error: (err as Error).message });
+    }
   },
 );

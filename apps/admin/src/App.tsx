@@ -124,6 +124,8 @@ function PermissionsPanel() {
 export default function App() {
   const [users, setUsers] = useState<AdminUser[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [revoked, setRevoked] = useState<Record<string, "pending" | "done" | "error">>({});
+  const [ownId, setOwnId] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/auth/admin/users", { credentials: "same-origin" })
@@ -133,7 +135,29 @@ export default function App() {
       })
       .then(setUsers)
       .catch((err) => setError((err as Error).message));
+
+    // Needed to hide the "Revoke session" action on the logged-in admin's
+    // own row — there's no recovery path in this UI if an admin locks
+    // themselves out, so the server also rejects self-revocation, but
+    // hiding the button avoids the confusing "why did that fail" moment.
+    fetch("/auth/me", { credentials: "same-origin" })
+      .then((res) => (res.ok ? (res.json() as Promise<{ sub: string }>) : null))
+      .then((me) => setOwnId(me?.sub ?? null));
   }, []);
+
+  async function revokeSession(userId: string) {
+    setRevoked((prev) => ({ ...prev, [userId]: "pending" }));
+    try {
+      const res = await fetch(`/auth/admin/sessions/${userId}/revoke`, {
+        method: "PUT",
+        credentials: "same-origin",
+      });
+      if (!res.ok) throw new Error(`${res.status}`);
+      setRevoked((prev) => ({ ...prev, [userId]: "done" }));
+    } catch {
+      setRevoked((prev) => ({ ...prev, [userId]: "error" }));
+    }
+  }
 
   return (
     <main className="min-h-screen bg-slate-950 p-8 text-slate-100">
@@ -153,7 +177,8 @@ export default function App() {
                 <tr>
                   <th className="py-2 pr-4 font-medium">Name</th>
                   <th className="py-2 pr-4 font-medium">Email</th>
-                  <th className="py-2 font-medium">Roles</th>
+                  <th className="py-2 pr-4 font-medium">Roles</th>
+                  <th className="py-2 font-medium">Session</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800">
@@ -161,7 +186,28 @@ export default function App() {
                   <tr key={user.id}>
                     <td className="py-2 pr-4">{user.name}</td>
                     <td className="py-2 pr-4 text-slate-400">{user.email}</td>
-                    <td className="py-2 text-slate-400">{user.roles.join(", ")}</td>
+                    <td className="py-2 pr-4 text-slate-400">{user.roles.join(", ")}</td>
+                    <td className="py-2">
+                      {user.id === ownId ? (
+                        <span className="text-slate-500">(you)</span>
+                      ) : (
+                        <>
+                          <button
+                            onClick={() => revokeSession(user.id)}
+                            disabled={revoked[user.id] === "pending"}
+                            className="rounded-md bg-red-900/40 px-3 py-1 text-red-300 hover:bg-red-900/70 disabled:opacity-50"
+                          >
+                            Revoke session
+                          </button>
+                          {revoked[user.id] === "done" && (
+                            <span className="ml-2 text-emerald-400">Revoked</span>
+                          )}
+                          {revoked[user.id] === "error" && (
+                            <span className="ml-2 text-red-400">Failed</span>
+                          )}
+                        </>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>

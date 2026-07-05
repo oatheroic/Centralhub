@@ -1,7 +1,11 @@
 import { Pool } from "pg";
 import { config } from "./config.js";
 
-export const pool = new Pool({ connectionString: config.databaseUrl });
+// connectionTimeoutMillis bounds worst-case latency on every gated request
+// during a DB outage — observed ~5s of DNS-retry hang without it (still
+// fails closed correctly either way, but a bounded fast failure is a much
+// better experience than a slow one while degraded).
+export const pool = new Pool({ connectionString: config.databaseUrl, connectionTimeoutMillis: 1500 });
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -36,6 +40,26 @@ export async function migrate(): Promise<void> {
       can_edit   BOOLEAN NOT NULL DEFAULT false,
       can_delete BOOLEAN NOT NULL DEFAULT false,
       PRIMARY KEY (user_sub, app_id)
+    );
+  `);
+  // Mirrors Keycloak realm role assignments so role checks (e.g. "admin")
+  // can be re-verified on every request instead of trusting a role list
+  // frozen into the session JWT at login time — see README "Pillar 4c".
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_roles (
+      user_sub TEXT NOT NULL,
+      role     TEXT NOT NULL,
+      PRIMARY KEY (user_sub, role)
+    );
+  `);
+  // Absence of a row for a user = never revoked. A session is rejected if
+  // its JWT's issued-at time predates this timestamp — lets an admin (or
+  // Keycloak's backchannel-logout webhook) force-invalidate an
+  // already-issued, still-unexpired session instantly.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS session_revocations (
+      user_sub       TEXT PRIMARY KEY,
+      revoked_before TIMESTAMPTZ NOT NULL
     );
   `);
 }

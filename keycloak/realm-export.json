@@ -27,7 +27,9 @@
       "webOrigins": [],
       "fullScopeAllowed": true,
       "attributes": {
-        "post.logout.redirect.uris": "http://localhost:8080/*"
+        "post.logout.redirect.uris": "http://localhost:8080/*",
+        "backchannel.logout.url": "http://auth-gateway:4100/backchannel-logout",
+        "backchannel.logout.session.required": "true"
       },
       "protocolMappers": [
         {

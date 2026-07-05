@@ -2,6 +2,7 @@ import { Router } from "express";
 import { completeLogin } from "../oidc.js";
 import { signSession, SESSION_COOKIE, ID_TOKEN_COOKIE } from "../session.js";
 import { safeRedirectPath } from "../safeRedirect.js";
+import { syncRolesFromKeycloak } from "../roles.js";
 
 export const callbackRouter = Router();
 
@@ -25,7 +26,12 @@ callbackRouter.get("/callback", async (req, res) => {
 
   try {
     const { sub, name, email, roles, idToken } = await completeLogin(code);
-    const token = await signSession({ sub, name, email, roles });
+    // Mirror into user_roles so role checks can be re-verified live on every
+    // request afterward — the JWT below deliberately does NOT carry roles;
+    // it's identity-only (sub/name/email), never the authorization source
+    // of truth. See README "Pillar 4c".
+    await syncRolesFromKeycloak(sub, roles);
+    const token = await signSession({ sub, name, email });
     res.cookie(SESSION_COOKIE, token, {
       httpOnly: true,
       sameSite: "lax",
