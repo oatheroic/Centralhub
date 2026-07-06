@@ -6,7 +6,9 @@ import { AppCard } from "./components/AppCard";
 
 export default function App() {
   const [user, setUser] = useState<SessionUser | null | undefined>(undefined);
-  const apps = appRegistry.filter((a) => !a.hidden);
+  const apps = appRegistry.filter(
+    (a) => !a.hidden && (!a.requiresRole || user?.roles.includes(a.requiresRole)),
+  );
 
   useEffect(() => {
     fetchSession().then(setUser);

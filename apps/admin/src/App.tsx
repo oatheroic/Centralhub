@@ -1,4 +1,15 @@
 import { useEffect, useState } from "react";
+import {
+  AppShell,
+  Badge,
+  Button,
+  ConfirmDialog,
+  DataTable,
+  Skeleton,
+  ToastProvider,
+  useToast,
+  type DataTableColumn,
+} from "@centralhub/ui";
 
 type AdminUser = {
   id: string;
@@ -19,7 +30,8 @@ const VERBS: (keyof PermissionSet)[] = ["read", "write", "edit", "delete"];
 
 function PermissionsPanel() {
   const [matrix, setMatrix] = useState<PermissionMatrix | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const toast = useToast();
 
   useEffect(() => {
     fetch("/auth/admin/permissions", { credentials: "same-origin" })
@@ -28,7 +40,7 @@ function PermissionsPanel() {
         return res.json() as Promise<PermissionMatrix>;
       })
       .then(setMatrix)
-      .catch((err) => setError((err as Error).message));
+      .catch((err) => setLoadError((err as Error).message));
   }, []);
 
   async function toggle(userId: string, appId: string, verb: keyof PermissionSet) {
@@ -56,49 +68,62 @@ function PermissionsPanel() {
         ...matrix,
         permissions: { ...matrix.permissions, [userId]: { ...matrix.permissions[userId], [appId]: current } },
       });
-      setError((err as Error).message);
+      toast.show({
+        tone: "danger",
+        title: "Couldn't save permission",
+        description: (err as Error).message,
+      });
     }
   }
 
   return (
     <section className="space-y-4">
       <header>
-        <h2 className="text-xl font-semibold">Permissions</h2>
-        <p className="text-slate-400">
+        <h2 className="text-xl font-semibold text-text">Permissions</h2>
+        <p className="text-text-muted">
           Per-user, per-app read/write/edit/delete grants. Toggling a checkbox saves immediately.
         </p>
       </header>
 
-      {error && <p className="text-sm text-red-400">Failed to load or save: {error}</p>}
-      {!error && !matrix && <p className="text-sm text-slate-500">Loading...</p>}
+      {loadError && (
+        <p className="text-sm text-danger">Failed to load permissions: {loadError}</p>
+      )}
+
+      {!loadError && !matrix && (
+        <div className="space-y-2">
+          <Skeleton className="h-8 w-full" />
+          <Skeleton className="h-8 w-full" />
+          <Skeleton className="h-8 w-full" />
+        </div>
+      )}
 
       {matrix && (
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto rounded-lg border border-border">
           <table className="w-full text-left text-sm">
-            <thead className="text-slate-500">
+            <thead className="text-text-muted">
               <tr>
-                <th className="py-2 pr-4 font-medium">User</th>
+                <th className="border-b border-border px-4 py-2 font-medium">User</th>
                 {matrix.apps.map((appId) => (
-                  <th key={appId} className="py-2 pr-4 font-medium">
+                  <th key={appId} className="border-b border-border px-4 py-2 font-medium">
                     {appId}
                   </th>
                 ))}
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-800">
+            <tbody className="divide-y divide-border">
               {matrix.users.map((user) => (
                 <tr key={user.id}>
-                  <td className="py-2 pr-4 align-top">
-                    <div>{user.name}</div>
-                    <div className="text-slate-500">{user.email}</div>
+                  <td className="px-4 py-3 align-top">
+                    <div className="text-text">{user.name}</div>
+                    <div className="text-text-muted">{user.email}</div>
                   </td>
                   {matrix.apps.map((appId) => {
                     const permission = matrix.permissions[user.id][appId];
                     return (
-                      <td key={appId} className="py-2 pr-4 align-top">
+                      <td key={appId} className="px-4 py-3 align-top">
                         <div className="flex flex-col gap-1">
                           {VERBS.map((verb) => (
-                            <label key={verb} className="flex items-center gap-2 text-slate-400">
+                            <label key={verb} className="flex items-center gap-2 text-text-muted">
                               <input
                                 type="checkbox"
                                 checked={permission[verb]}
@@ -121,11 +146,12 @@ function PermissionsPanel() {
   );
 }
 
-export default function App() {
+function UsersPanel() {
   const [users, setUsers] = useState<AdminUser[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [revoked, setRevoked] = useState<Record<string, "pending" | "done" | "error">>({});
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [ownId, setOwnId] = useState<string | null>(null);
+  const [revokeTarget, setRevokeTarget] = useState<AdminUser | null>(null);
+  const toast = useToast();
 
   useEffect(() => {
     fetch("/auth/admin/users", { credentials: "same-origin" })
@@ -134,7 +160,7 @@ export default function App() {
         return res.json() as Promise<AdminUser[]>;
       })
       .then(setUsers)
-      .catch((err) => setError((err as Error).message));
+      .catch((err) => setLoadError((err as Error).message));
 
     // Needed to hide the "Revoke session" action on the logged-in admin's
     // own row — there's no recovery path in this UI if an admin locks
@@ -145,78 +171,127 @@ export default function App() {
       .then((me) => setOwnId(me?.sub ?? null));
   }, []);
 
-  async function revokeSession(userId: string) {
-    setRevoked((prev) => ({ ...prev, [userId]: "pending" }));
+  async function confirmRevoke() {
+    if (!revokeTarget) return;
+    const { id, name } = revokeTarget;
     try {
-      const res = await fetch(`/auth/admin/sessions/${userId}/revoke`, {
+      const res = await fetch(`/auth/admin/sessions/${id}/revoke`, {
         method: "PUT",
         credentials: "same-origin",
       });
       if (!res.ok) throw new Error(`${res.status}`);
-      setRevoked((prev) => ({ ...prev, [userId]: "done" }));
-    } catch {
-      setRevoked((prev) => ({ ...prev, [userId]: "error" }));
+      toast.show({ tone: "success", title: `Session revoked for ${name}` });
+    } catch (err) {
+      toast.show({
+        tone: "danger",
+        title: `Couldn't revoke session for ${name}`,
+        description: (err as Error).message,
+      });
     }
   }
 
+  const columns: DataTableColumn<AdminUser>[] = [
+    {
+      key: "name",
+      header: "Name",
+      render: (user) => user.name,
+      sortValue: (user) => user.name.toLowerCase(),
+    },
+    {
+      key: "email",
+      header: "Email",
+      render: (user) => <span className="text-text-muted">{user.email}</span>,
+      sortValue: (user) => user.email.toLowerCase(),
+    },
+    {
+      key: "roles",
+      header: "Roles",
+      render: (user) => (
+        <div className="flex flex-wrap gap-1">
+          {user.roles.map((role) => (
+            <Badge key={role} tone="success">
+              {role}
+            </Badge>
+          ))}
+        </div>
+      ),
+    },
+    {
+      key: "session",
+      header: "Session",
+      render: (user) =>
+        user.id === ownId ? (
+          <span className="text-text-muted">(you)</span>
+        ) : (
+          <Button variant="danger" onClick={() => setRevokeTarget(user)}>
+            Revoke session
+          </Button>
+        ),
+    },
+  ];
+
   return (
-    <main className="min-h-screen bg-slate-950 p-8 text-slate-100">
-      <div className="mx-auto max-w-5xl space-y-10">
-        <section className="space-y-4">
-          <header>
-            <h1 className="text-3xl font-semibold">Admin</h1>
-            <p className="text-slate-400">Users registered in Keycloak.</p>
-          </header>
+    <section className="space-y-4">
+      <header>
+        <h2 className="text-xl font-semibold text-text">Users</h2>
+        <p className="text-text-muted">Users registered in Keycloak.</p>
+      </header>
 
-          {error && <p className="text-sm text-red-400">Failed to load users: {error}</p>}
-          {!error && !users && <p className="text-sm text-slate-500">Loading...</p>}
+      {loadError && <p className="text-sm text-danger">Failed to load users: {loadError}</p>}
 
-          {users && (
-            <table className="w-full text-left text-sm">
-              <thead className="text-slate-500">
-                <tr>
-                  <th className="py-2 pr-4 font-medium">Name</th>
-                  <th className="py-2 pr-4 font-medium">Email</th>
-                  <th className="py-2 pr-4 font-medium">Roles</th>
-                  <th className="py-2 font-medium">Session</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800">
-                {users.map((user) => (
-                  <tr key={user.id}>
-                    <td className="py-2 pr-4">{user.name}</td>
-                    <td className="py-2 pr-4 text-slate-400">{user.email}</td>
-                    <td className="py-2 pr-4 text-slate-400">{user.roles.join(", ")}</td>
-                    <td className="py-2">
-                      {user.id === ownId ? (
-                        <span className="text-slate-500">(you)</span>
-                      ) : (
-                        <>
-                          <button
-                            onClick={() => revokeSession(user.id)}
-                            disabled={revoked[user.id] === "pending"}
-                            className="rounded-md bg-red-900/40 px-3 py-1 text-red-300 hover:bg-red-900/70 disabled:opacity-50"
-                          >
-                            Revoke session
-                          </button>
-                          {revoked[user.id] === "done" && (
-                            <span className="ml-2 text-emerald-400">Revoked</span>
-                          )}
-                          {revoked[user.id] === "error" && (
-                            <span className="ml-2 text-red-400">Failed</span>
-                          )}
-                        </>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </section>
+      {!loadError && (
+        <DataTable
+          columns={columns}
+          rows={users ?? []}
+          getRowId={(user) => user.id}
+          searchFields={(user) => [user.name, user.email]}
+          searchPlaceholder="Search by name or email..."
+          loading={users === null}
+          emptyTitle="No users found"
+          emptyDescription="No users match your search."
+        />
+      )}
 
-        <PermissionsPanel />
-      </div>
-    </main>
+      <ConfirmDialog
+        open={revokeTarget !== null}
+        onOpenChange={(open) => !open && setRevokeTarget(null)}
+        title={`Revoke session for ${revokeTarget?.name ?? ""}?`}
+        description="They'll be signed out immediately and required to log in again."
+        confirmLabel="Revoke session"
+        danger
+        onConfirm={confirmRevoke}
+      />
+    </section>
+  );
+}
+
+type Tab = "users" | "permissions";
+
+export default function App() {
+  const [tab, setTab] = useState<Tab>("users");
+
+  return (
+    <ToastProvider>
+      <AppShell
+        title="Admin"
+        actions={
+          <nav className="flex gap-2">
+            <Button variant={tab === "users" ? "primary" : "secondary"} onClick={() => setTab("users")}>
+              Users
+            </Button>
+            <Button
+              variant={tab === "permissions" ? "primary" : "secondary"}
+              onClick={() => setTab("permissions")}
+            >
+              Permissions
+            </Button>
+          </nav>
+        }
+      >
+        <div className="space-y-10">
+          {tab === "users" ? <UsersPanel /> : <PermissionsPanel />}
+        </div>
+      </AppShell>
+    </ToastProvider>
   );
 }

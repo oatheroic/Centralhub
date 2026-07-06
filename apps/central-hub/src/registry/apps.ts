@@ -1,5 +1,5 @@
 import type { LucideIcon } from "lucide-react";
-import { DollarSign, LayoutGrid, Megaphone } from "lucide-react";
+import { DollarSign, LayoutGrid, Megaphone, ShieldCheck } from "lucide-react";
 
 export type AppRegistryEntry = {
   /** Matches apps/<id> and the app-<id> compose service name. */
@@ -12,6 +12,12 @@ export type AppRegistryEntry = {
   description?: string;
   /** Excludes this entry from the hub's own grid (used for central-hub itself). */
   hidden?: boolean;
+  /**
+   * Only shows this entry to users whose session includes this Keycloak
+   * role. Purely a discoverability affordance — the actual access gate is
+   * always enforced server-side (Nginx role check), unaffected by this.
+   */
+  requiresRole?: string;
 };
 
 export const appRegistry: AppRegistryEntry[] = [
@@ -38,5 +44,14 @@ export const appRegistry: AppRegistryEntry[] = [
     icon: DollarSign,
     path: "/apps/finance/",
     description: "Budgets, forecasting and reporting.",
+  },
+  {
+    id: "admin",
+    name: "Admin",
+    department: "Platform",
+    icon: ShieldCheck,
+    path: "/apps/admin/",
+    description: "Manage users, permissions, and sessions.",
+    requiresRole: "admin",
   },
 ];
