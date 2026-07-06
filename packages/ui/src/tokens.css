@@ -1,0 +1,63 @@
+/*
+ * CentralHub design tokens. Stored as "r g b" triplets (not hex) so Tailwind's
+ * rgb(var(--x) / <alpha-value>) pattern can apply opacity modifiers (bg-accent/10
+ * etc.) the same way the old hand-copied indigo-500/10 classes did.
+ *
+ * Dark values match today's existing hand-copied palette exactly, so migrating
+ * an app onto these tokens does not change how it looks. Light is new — mapped
+ * onto the other end of the same Tailwind scales (slate/indigo/emerald/red)
+ * already in use, not a fresh color study.
+ */
+
+:root {
+  --chub-bg: 248 250 252; /* slate-50 */
+  --chub-surface: 255 255 255; /* white */
+  --chub-border: 226 232 240; /* slate-200 */
+  --chub-text: 15 23 42; /* slate-900 */
+  --chub-text-muted: 100 116 139; /* slate-500 */
+
+  --chub-accent: 79 70 229; /* indigo-600 */
+  --chub-accent-fg: 255 255 255;
+
+  --chub-success: 5 150 105; /* emerald-600 */
+  --chub-success-bg: 209 250 229; /* emerald-100 */
+
+  --chub-danger: 220 38 38; /* red-600 */
+  --chub-danger-bg: 254 226 226; /* red-100 */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) {
+    --chub-bg: 2 6 23; /* slate-950 */
+    --chub-surface: 15 23 42; /* slate-900 */
+    --chub-border: 30 41 59; /* slate-800 */
+    --chub-text: 241 245 249; /* slate-100 */
+    --chub-text-muted: 100 116 139; /* slate-500 */
+
+    --chub-accent: 99 102 241; /* indigo-500 */
+    --chub-accent-fg: 255 255 255;
+
+    --chub-success: 52 211 153; /* emerald-400 */
+    --chub-success-bg: 6 78 59; /* emerald-900-ish */
+
+    --chub-danger: 248 113 113; /* red-400 */
+    --chub-danger-bg: 127 29 29; /* red-900 */
+  }
+}
+
+:root.dark {
+  --chub-bg: 2 6 23;
+  --chub-surface: 15 23 42;
+  --chub-border: 30 41 59;
+  --chub-text: 241 245 249;
+  --chub-text-muted: 100 116 139;
+
+  --chub-accent: 99 102 241;
+  --chub-accent-fg: 255 255 255;
+
+  --chub-success: 52 211 153;
+  --chub-success-bg: 6 78 59;
+
+  --chub-danger: 248 113 113;
+  --chub-danger-bg: 127 29 29;
+}

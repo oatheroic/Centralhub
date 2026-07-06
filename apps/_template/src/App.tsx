@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { AppShell, Button, Card } from "@centralhub/ui";
 
 export default function App() {
   const [status, setStatus] = useState<string>("idle");
@@ -15,18 +16,14 @@ export default function App() {
   }
 
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center gap-4 p-8">
-      <h1 className="text-3xl font-semibold">Template App</h1>
-      <p className="text-slate-400">
-        Copy <code>apps/_template</code> to scaffold a new department mini-app.
-      </p>
-      <button
-        onClick={pingInferenceGateway}
-        className="rounded-md bg-indigo-600 px-4 py-2 font-medium hover:bg-indigo-500"
-      >
-        Ping inference gateway
-      </button>
-      <p className="text-sm text-slate-500">{status}</p>
-    </main>
+    <AppShell title="Template App">
+      <Card className="flex flex-col items-start gap-4">
+        <p className="text-text-muted">
+          Copy <code>apps/_template</code> to scaffold a new department mini-app.
+        </p>
+        <Button onClick={pingInferenceGateway}>Ping inference gateway</Button>
+        <p className="text-sm text-text-muted">{status}</p>
+      </Card>
+    </AppShell>
   );
 }
