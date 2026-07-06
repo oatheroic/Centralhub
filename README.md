@@ -34,6 +34,9 @@ CentralHub/
 │   ├── finance/                # Department app
 │   └── admin/                  # User list + user × app permissions matrix editor,
 │                                # gated by the admin realm role
+├── packages/
+│   └── ui/                    # Shared design tokens, Tailwind preset, and React
+│                                # primitives (§9) — consumed via workspace:*
 ├── services/
 │   ├── inference-gateway/     # Single internal API all apps call for LLM access.
 │   │                           # Proxies to Claude today, swaps to a local model later.
@@ -342,7 +345,42 @@ CentralHub/
 
 ---
 
-## 9. Apps in this repo
+## 9. UI/UX foundation
+
+- **Objective**: replace hand-copied Tailwind classes, zero shared components,
+  and v1-grade rough edges (raw `window.alert()`, no confirm dialogs, no
+  search/sort) with a small reusable design system — without over-building
+  ahead of a real consumer, and without this being mistaken for a load-bearing
+  pillar. This isn't part of the numbered Phase 1-5 sequence or the Pillars
+  above: those are the infrastructure the system needs to function (routing,
+  environment, auth, RBAC, revocation); this is product polish on top of it,
+  not a prerequisite for anything else here to work.
+- **Shared foundation (`packages/ui`)**: design tokens (light + dark CSS
+  variables, `darkMode: "class"`), a Tailwind preset, and reusable primitives —
+  `Button`, `Card`, `Badge`, `Avatar`, `Input`, `EmptyState`, `Skeleton`,
+  `Toast`/`ConfirmDialog` (built on Radix UI — the repo's first external UI
+  dependency), `AppShell`, `DataTable`. Ships as raw TypeScript source with no
+  build step, consumed directly by each app's own Vite/esbuild pipeline via
+  `workspace:*`. Proven end-to-end in `apps/_template`, including a
+  from-scratch Docker build — each consuming app's `Dockerfile` needs one
+  added `COPY packages/ui ./packages/ui` line.
+- **Admin panel**: `apps/admin` adopts the foundation — an `AppShell` with
+  Users/Permissions tabs, the users table replaced by a searchable/sortable/
+  paginated `DataTable`, a `ConfirmDialog` gating session revoke (the
+  higher-stakes, harder-to-undo action — permission-checkbox toggles stay
+  instant/optimistic, unchanged, see §7), and toast notifications replacing
+  `window.alert()`/inline error text for both revoke and permission-toggle
+  feedback. Also added: a role-gated "Admin" card on `central-hub`'s landing
+  grid (`requiresRole` on `AppRegistryEntry`), visible only to users with the
+  `admin` role — a discoverability fix only; the real access gate stays
+  enforced server-side by Nginx either way.
+- **Status**: shared foundation + admin panel done. Landing page
+  (`central-hub`) polish — search/filter, adopting the shared `AppShell`
+  there too, `IdentityBanner` polish — not started yet.
+
+---
+
+## 10. Apps in this repo
 
 | App | Package | URL | Purpose |
 |---|---|---|---|
@@ -350,7 +388,7 @@ CentralHub/
 | `apps/central-hub` | `@apps/central-hub` | `/` (gateway root) | Landing dashboard; discovers apps via `src/registry/apps.ts`, shows the real logged-in user via `/auth/me`. |
 | `apps/marketing` | `@apps/marketing` | `/apps/marketing/` | Placeholder department app; demo RBAC-guarded "Save campaign" action. |
 | `apps/finance` | `@apps/finance` | `/apps/finance/` | Placeholder department app; demo RBAC-guarded "Approve budget" action. |
-| `apps/admin` | `@apps/admin` | `/apps/admin/` | Keycloak user list (with a per-user "Revoke session" action, §8) + permissions matrix editor (§7). Not in the registry above — never linked in the UI — but that's a minor bonus, not the real protection: the `admin`-role Nginx gate is what actually stops access. |
+| `apps/admin` | `@apps/admin` | `/apps/admin/` | Keycloak user list (with a per-user "Revoke session" action, §8, now confirm-gated, §9) + permissions matrix editor (§7). Linked from `central-hub`'s landing grid only for users holding the `admin` role (§9) — that's a discoverability nicety, not the real protection: the `admin`-role Nginx gate is what actually stops access. |
 
 This table is maintained by hand alongside `apps/central-hub/src/registry/apps.ts`
 and `services/auth-gateway/src/permissions.ts`'s `KNOWN_APPS` — update all three
@@ -358,7 +396,7 @@ when adding or removing an app.
 
 ---
 
-## 10. The inference swap
+## 11. The inference swap
 
 - **Objective**: moving from cloud Claude to a local model must be an env
   change, never a code change.
@@ -372,7 +410,7 @@ when adding or removing an app.
 
 ---
 
-## 11. Deferred / not started (catalog)
+## 12. Deferred / not started (catalog)
 
 Consolidated from the sections above, so it's checkable in one place:
 
@@ -387,10 +425,11 @@ Consolidated from the sections above, so it's checkable in one place:
 | Background role re-sync poller | `services/auth-gateway` | Would shrink the §8 console-role-change gap from "needs a manual force-logout" to "auto-corrects in ~1 min"; adds recurring Keycloak Admin API load for a low-frequency edge case that already has a manual remedy |
 | Per-session (`jti`) tracking / "your active sessions" UI | `session_revocations` table design | Current granularity is per-user (kill all sessions), not per-device — see §8 |
 | Production-safe credentials | `keycloak/realm-export.json`, `.env` | `dev-admin`/`dev-user`/client secret are dev-only seed data — see §6, §7 |
+| Landing page (`central-hub`) UI/UX polish | `apps/central-hub` | Search/filter, shared `AppShell`, `IdentityBanner` polish — see §9 |
 
 ---
 
-## 12. Quickstart
+## 13. Quickstart
 
 ```sh
 pnpm install
