@@ -90,6 +90,9 @@ importers:
 
   apps/central-hub:
     dependencies:
+      '@centralhub/ui':
+        specifier: workspace:*
+        version: link:../../packages/ui
       lucide-react:
         specifier: ^0.460.0
         version: 0.460.0(react@18.3.1)
@@ -130,6 +133,9 @@ importers:
 
   apps/finance:
     dependencies:
+      '@centralhub/ui':
+        specifier: workspace:*
+        version: link:../../packages/ui
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -167,6 +173,9 @@ importers:
 
   apps/marketing:
     dependencies:
+      '@centralhub/ui':
+        specifier: workspace:*
+        version: link:../../packages/ui
       react:
         specifier: ^18.3.1
         version: 18.3.1

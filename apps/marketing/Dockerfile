@@ -4,6 +4,7 @@ FROM node:20-alpine AS build
 WORKDIR /workspace
 RUN corepack enable
 COPY pnpm-workspace.yaml package.json ./
+COPY packages/ui ./packages/ui
 COPY apps/marketing ./apps/marketing
 RUN pnpm install --filter @apps/marketing... --frozen-lockfile=false
 RUN pnpm --filter @apps/marketing build

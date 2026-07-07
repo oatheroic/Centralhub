@@ -4,6 +4,7 @@ FROM node:20-alpine AS build
 WORKDIR /workspace
 RUN corepack enable
 COPY pnpm-workspace.yaml package.json ./
+COPY packages/ui ./packages/ui
 COPY apps/central-hub ./apps/central-hub
 RUN pnpm install --filter @apps/central-hub... --frozen-lockfile=false
 RUN pnpm --filter @apps/central-hub build

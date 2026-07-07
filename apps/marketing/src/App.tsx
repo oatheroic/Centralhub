@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { AppShell, Button, Card } from "@centralhub/ui";
 import { usePermissions, useGuardedAction, useReadGuard } from "./lib/usePermissions";
 
 type SessionUser = { name: string; email: string };
@@ -25,32 +26,28 @@ export default function App() {
         onClick={() => {
           window.location.href = "/";
         }}
-        className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center gap-2 p-8 cursor-pointer"
+        className="min-h-screen bg-bg text-text-muted flex flex-col items-center justify-center gap-2 p-8 cursor-pointer"
       >
-        <h1 className="text-xl font-semibold">Access denied</h1>
-        <p className="text-sm text-slate-500">Click anywhere to go back to the dashboard.</p>
+        <h1 className="text-xl font-semibold text-text">Access denied</h1>
+        <p className="text-sm text-text-muted">Click anywhere to go back to the dashboard.</p>
       </main>
     );
   }
 
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center gap-4 p-8">
-      <h1 className="text-3xl font-semibold">Marketing Department</h1>
-      <p className="text-slate-400">Placeholder app — scaffolded from apps/_template.</p>
-      <p className="text-sm text-slate-500">
-        {user === undefined
-          ? "checking session..."
-          : user
-            ? `Logged in as ${user.name} (${user.email})`
-            : "No session detected"}
-      </p>
-      <button
-        onClick={handleSaveCampaign}
-        className="rounded-md bg-indigo-600 px-4 py-2 font-medium hover:bg-indigo-500"
-      >
-        Save campaign
-      </button>
-      {saveStatus && <p className="text-sm text-emerald-400">{saveStatus}</p>}
-    </main>
+    <AppShell title="Marketing Department">
+      <Card className="flex flex-col items-start gap-4">
+        <p className="text-text-muted">Placeholder app — scaffolded from apps/_template.</p>
+        <p className="text-sm text-text-muted">
+          {user === undefined
+            ? "checking session..."
+            : user
+              ? `Logged in as ${user.name} (${user.email})`
+              : "No session detected"}
+        </p>
+        <Button onClick={handleSaveCampaign}>Save campaign</Button>
+        {saveStatus && <p className="text-sm text-success">{saveStatus}</p>}
+      </Card>
+    </AppShell>
   );
 }
