@@ -374,9 +374,24 @@ CentralHub/
   grid (`requiresRole` on `AppRegistryEntry`), visible only to users with the
   `admin` role — a discoverability fix only; the real access gate stays
   enforced server-side by Nginx either way.
-- **Status**: shared foundation + admin panel done. Landing page
-  (`central-hub`) polish — search/filter, adopting the shared `AppShell`
-  there too, `IdentityBanner` polish — not started yet.
+- **Landing page + department apps**: `apps/central-hub`, `apps/marketing`,
+  and `apps/finance` all adopt the foundation, finishing the rollout to every
+  app in the repo. Central-hub's grid gains a live search box and
+  department-derived filter tabs (no hardcoded department list — pulled from
+  the registry), an `EmptyState` with a "Clear filters" action when nothing
+  matches, and a `Skeleton` placeholder on `IdentityBanner` while the session
+  resolves; `IdentityBanner` itself gains an `Avatar` and a `Badge` for the
+  role pill. `marketing`/`finance` are wrapped in `AppShell`, giving both a
+  persistent "back to Central Hub" link instead of relying on browser back —
+  their "Access denied" click-anywhere view keeps its exact behavior, just
+  restyled onto tokens. `usePermissions.ts`'s `window.alert()` (still
+  duplicated across `_template`/`marketing`/`finance`) is deliberately
+  untouched — a separate, already-deferred cleanup, not part of this pass.
+- **Status**: done — shared foundation, admin panel, and landing page/
+  department-app rollout all complete; every app in the repo is now on
+  `packages/ui`. Grouping/"recently used" row and an announcement banner
+  (both explicitly Low-priority, optional) remain deferred — 4 apps doesn't
+  earn grouping's keep yet.
 
 ---
 
@@ -425,7 +440,9 @@ Consolidated from the sections above, so it's checkable in one place:
 | Background role re-sync poller | `services/auth-gateway` | Would shrink the §8 console-role-change gap from "needs a manual force-logout" to "auto-corrects in ~1 min"; adds recurring Keycloak Admin API load for a low-frequency edge case that already has a manual remedy |
 | Per-session (`jti`) tracking / "your active sessions" UI | `session_revocations` table design | Current granularity is per-user (kill all sessions), not per-device — see §8 |
 | Production-safe credentials | `keycloak/realm-export.json`, `.env` | `dev-admin`/`dev-user`/client secret are dev-only seed data — see §6, §7 |
-| Landing page (`central-hub`) UI/UX polish | `apps/central-hub` | Search/filter, shared `AppShell`, `IdentityBanner` polish — see §9 |
+| Grouping by department / "recently used" row | `apps/central-hub` landing grid | Low-priority, optional per §9 — 4 apps doesn't earn grouping's keep yet |
+| Announcement/system banner | `apps/central-hub` landing page | Low-priority, optional per §9 — no operator need for it yet |
+| `usePermissions.ts`'s `window.alert()` → toast | `apps/_template`, `apps/marketing`, `apps/finance` | Duplicated across 3 files by design (§9); a real fix needs extracting the hook into `packages/ui` first, out of scope for §9's UI-primitives pass |
 
 ---
 
