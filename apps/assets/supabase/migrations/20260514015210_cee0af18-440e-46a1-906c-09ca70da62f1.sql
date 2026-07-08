@@ -1,0 +1,1 @@
+ALTER TABLE public.asset_purchase_requests ADD COLUMN IF NOT EXISTS asset_name text;

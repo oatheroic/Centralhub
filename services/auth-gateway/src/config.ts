@@ -24,6 +24,13 @@ export const config = {
 
   sessionSecret: requireEnv("AUTH_SESSION_SECRET"),
 
+  // Shared with postgrest-assets/storage-assets (and any future third-party
+  // app's self-hosted data layer) — signs the short-lived data-access JWTs
+  // minted by GET /auth/data-token. Deliberately a separate secret from
+  // sessionSecret: this one is trusted by services outside this process
+  // (PostgREST verifies it directly), the session secret is not.
+  pgrstJwtSecret: requireEnv("PGRST_JWT_SECRET"),
+
   // Reuses the same Postgres instance/credentials that already back
   // Keycloak — see README "Pillar 4" for why this doesn't warrant a
   // separate database engine or container.

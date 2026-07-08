@@ -6,6 +6,8 @@ networks:
 
 volumes:
   pgdata: {}
+  assets_pgdata: {}
+  assets_storage: {}
 
 services:
   gateway:
@@ -22,6 +24,7 @@ services:
       - app-marketing
       - app-finance
       - app-admin
+      - app-assets
     networks:
       - centralhub
 
@@ -106,9 +109,77 @@ services:
       # Reuses the db service/credentials that already back Keycloak — see
       # README "Pillar 4" for why this doesn't warrant a separate database.
       DATABASE_URL: postgres://keycloak:${POSTGRES_PASSWORD}@db:5432/keycloak
+      # Shared with postgrest-assets/storage-assets — lets /auth/data-token
+      # mint JWTs those services trust, sourced from the same app_permissions
+      # rows every other app already uses. See README's third-party app
+      # ingestion section.
+      PGRST_JWT_SECRET: ${PGRST_JWT_SECRET}
     depends_on:
       - keycloak
       - db
+    networks:
+      - centralhub
+
+  # --- Assets app's own database: a sibling to `db`, not a schema inside it —
+  # every third-party app gets its own dedicated Postgres, per the per-app-
+  # owns-its-data principle. Never shares credentials with `db` (Keycloak).
+  assets-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: assets
+      POSTGRES_USER: assets
+      POSTGRES_PASSWORD: ${ASSETS_DB_PASSWORD}
+    volumes:
+      - assets_pgdata:/var/lib/postgresql/data
+      - ../apps/assets/scripts/init-roles.sql:/docker-entrypoint-initdb.d/00-roles.sql:ro
+    networks:
+      - centralhub
+
+  # --- PostgREST: auto-generated REST API in front of assets-db, replacing
+  # the hosted Supabase project the app was exported with. Verifies the
+  # bearer JWT itself (PGRST_JWT_SECRET, shared with auth-gateway's
+  # /auth/data-token minter) and exposes its claims to Postgres as
+  # request.jwt.claims, which the rewritten RLS policies
+  # (apps/assets/supabase/migrations/..._centralhub_rls.sql) check for real
+  # read/write/edit/delete grants — replacing the exported USING (true)
+  # policies, which enforced nothing.
+  postgrest-assets:
+    image: postgrest/postgrest:v12.2.3
+    environment:
+      PGRST_DB_URI: postgres://assets:${ASSETS_DB_PASSWORD}@assets-db:5432/assets
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: assets_anon
+      PGRST_JWT_SECRET: ${PGRST_JWT_SECRET}
+      PGRST_JWT_ROLE_CLAIM_KEY: .role
+    depends_on:
+      - assets-db
+    networks:
+      - centralhub
+
+  # --- Storage API: self-hosted replacement for Supabase Storage, backing
+  # the app's "asset-images" bucket. File-system backend (a Docker volume),
+  # not S3 — this is an internal tool's image/PDF attachments, not a CDN
+  # workload. Keeps supabase.storage.from(...) client calls in the app
+  # working unmodified; only client.ts's URL/key config changes.
+  storage-assets:
+    image: supabase/storage-api:v1.11.13
+    environment:
+      ANON_KEY: ${ASSETS_STORAGE_ANON_KEY}
+      SERVICE_KEY: ${ASSETS_STORAGE_SERVICE_KEY}
+      PGRST_JWT_SECRET: ${PGRST_JWT_SECRET}
+      DATABASE_URL: postgres://assets:${ASSETS_DB_PASSWORD}@assets-db:5432/assets
+      DB_INSTALL_ROLES: "false"
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: assets
+      REGION: local
+      GLOBAL_S3_BUCKET: unused
+      FILE_SIZE_LIMIT: "52428800"
+      ENABLE_IMAGE_TRANSFORMATION: "false"
+    volumes:
+      - assets_storage:/var/lib/storage
+    depends_on:
+      - assets-db
     networks:
       - centralhub
 
@@ -147,6 +218,44 @@ services:
     build:
       context: ..
       dockerfile: apps/finance/Dockerfile
+    networks:
+      - centralhub
+
+  # --- One-shot migrator for assets-db: applies the exported migrations
+  # (with their storage.* statements stripped — the `storage` schema doesn't
+  # exist yet at that point) and then, after waiting for storage-assets to
+  # finish its own schema bootstrap, applies the CentralHub RLS-rewrite
+  # migration, which is also where the storage bucket + its real policies
+  # get created. Retries internally rather than using compose health-check
+  # conditions, matching every other service's dependency-readiness pattern
+  # in this file (see auth-gateway's db.ts, Keycloak's own boot).
+  assets-migrate:
+    build:
+      context: ..
+      dockerfile: apps/assets/scripts/Dockerfile
+    environment:
+      PGHOST: assets-db
+      PGUSER: assets
+      PGPASSWORD: ${ASSETS_DB_PASSWORD}
+      PGDATABASE: assets
+      STORAGE_HEALTH_URL: http://storage-assets:5000/status
+    depends_on:
+      - assets-db
+      - storage-assets
+    networks:
+      - centralhub
+
+  # --- App: assets (first third-party/Lovable-exported app) -----------------
+  # Talks to postgrest-assets/storage-assets, not the gateway's app_permissions
+  # flow directly — gated by the same generic /apps/assets/ Nginx block as
+  # every app, plus a dedicated /apps/assets/api/ location for its data calls.
+  app-assets:
+    build:
+      context: ..
+      dockerfile: apps/assets/Dockerfile
+    depends_on:
+      - postgrest-assets
+      - storage-assets
     networks:
       - centralhub
 

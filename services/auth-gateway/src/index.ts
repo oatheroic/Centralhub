@@ -12,6 +12,7 @@ import { adminPermissionsRouter } from "./routes/adminPermissions.js";
 import { adminSessionsRouter } from "./routes/adminSessions.js";
 import { backchannelLogoutRouter } from "./routes/backchannelLogout.js";
 import { deniedRouter } from "./routes/denied.js";
+import { dataTokenRouter } from "./routes/dataToken.js";
 
 const app = express();
 app.use(cookieParser());
@@ -33,6 +34,7 @@ app.use(adminPermissionsRouter);
 app.use(adminSessionsRouter);
 app.use(backchannelLogoutRouter);
 app.use(deniedRouter);
+app.use(dataTokenRouter);
 
 async function start() {
   await migrate();

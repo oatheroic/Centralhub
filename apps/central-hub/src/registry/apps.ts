@@ -1,5 +1,5 @@
 import type { LucideIcon } from "lucide-react";
-import { DollarSign, LayoutGrid, Megaphone, ShieldCheck } from "lucide-react";
+import { Boxes, DollarSign, LayoutGrid, Megaphone, ShieldCheck } from "lucide-react";
 
 export type AppRegistryEntry = {
   /** Matches apps/<id> and the app-<id> compose service name. */
@@ -44,6 +44,14 @@ export const appRegistry: AppRegistryEntry[] = [
     icon: DollarSign,
     path: "/apps/finance/",
     description: "Budgets, forecasting and reporting.",
+  },
+  {
+    id: "assets",
+    name: "Assets",
+    department: "Operations",
+    icon: Boxes,
+    path: "/apps/assets/",
+    description: "Asset purchase requests, registration, and transfers.",
   },
   {
     id: "admin",

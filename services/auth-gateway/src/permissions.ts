@@ -6,7 +6,7 @@ import { listUsers, findUserSubByUsername } from "./keycloakAdmin.js";
 // README apps table) when adding a new app. Excludes central-hub (always
 // reachable once logged in) and admin (gated by the Keycloak `admin` role
 // instead of this table).
-export const KNOWN_APPS = ["marketing", "finance"];
+export const KNOWN_APPS = ["marketing", "finance", "assets"];
 
 export type PermissionSet = {
   read: boolean;
@@ -119,7 +119,9 @@ export async function seedDevPermissions(maxAttempts = 45, delayMs = 2000): Prom
       const fullAccess = { read: true, write: true, edit: true, delete: true };
       await seedRow("dev-admin", "marketing", fullAccess);
       await seedRow("dev-admin", "finance", fullAccess);
+      await seedRow("dev-admin", "assets", fullAccess);
       await seedRow("dev-user", "marketing", { read: true, write: true });
+      await seedRow("dev-user", "assets", { read: true, write: true });
       // dev-user gets no row at all for finance — default-deny demonstrates
       // the permission-denied redirect page.
       return;
