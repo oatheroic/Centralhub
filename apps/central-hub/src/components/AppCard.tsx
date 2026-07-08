@@ -1,9 +1,11 @@
 import type { AppRegistryEntry } from "../registry/apps";
+import { recordAppOpen } from "../lib/recentApps";
 
 export function AppCard({ app }: { app: AppRegistryEntry }) {
   const Icon = app.icon;
 
   function handleOpen() {
+    recordAppOpen(app.id);
     // Real session cookies (chub_session) travel automatically on any
     // same-origin navigation — no manual cookie-setting needed anymore.
     window.location.href = app.path;
