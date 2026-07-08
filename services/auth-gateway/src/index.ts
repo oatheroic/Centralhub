@@ -4,6 +4,7 @@ import { config } from "./config.js";
 import { migrate } from "./db.js";
 import { seedDevPermissions } from "./permissions.js";
 import { seedDevAttributes } from "./attributes.js";
+import { startRoleSyncPoller } from "./roleSyncPoller.js";
 import { loginRouter } from "./routes/login.js";
 import { callbackRouter } from "./routes/callback.js";
 import { sessionRouter } from "./routes/session.js";
@@ -48,6 +49,10 @@ async function start() {
   // the gateway from serving real login traffic in the meantime.
   void seedDevPermissions();
   void seedDevAttributes();
+  // Runs independently of login: shrinks the console-role-change gap from
+  // "needs a manual force-logout" to "self-corrects within one interval" —
+  // see roleSyncPoller.ts and README §8/§13.
+  startRoleSyncPoller();
   app.listen(config.port, () => {
     console.log(`auth-gateway listening on :${config.port}`);
   });

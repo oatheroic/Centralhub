@@ -14,8 +14,12 @@
 //   - §12       (inference gateway)             -- reachable only when authenticated
 //
 // Deliberately NOT covered (see README §13 "Deferred / not started"): MFA,
-// per-record permissions, bulk grants, audit log, background role re-sync,
-// per-session (jti) tracking. Nothing here should test for those.
+// per-record permissions, bulk grants, audit log, per-session (jti)
+// tracking. Nothing here should test for those. The background role
+// re-sync poller (§8) is built but also isn't covered here — its effect
+// only becomes observable after waiting out a full ROLE_SYNC_INTERVAL_MS
+// tick, which doesn't fit this script's request-per-request assertion
+// style; see README §16 for how to verify it by hand.
 //
 // Usage:
 //   node scripts/test-stack.mjs
@@ -98,20 +102,24 @@ async function must(label, fn) {
 // ---------------------------------------------------------------------------
 
 function makeJar() {
-  return new Map(); // hostname -> Map(name -> value)
+  return new Map(); // hostKey -> Map(name -> value)
+}
+
+function hostKey(url) {
+  const u = new URL(url);
+  return `${u.hostname}:${u.port || ""}`;
 }
 
 function cookieHeaderFor(jar, url) {
-  const host = new URL(url).hostname + ":" + (new URL(url).port || "");
-  const store = jar.get(host);
+  const store = jar.get(hostKey(url));
   if (!store || store.size === 0) return undefined;
   return [...store.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
 }
 
 function absorbSetCookies(jar, url, res) {
-  const host = new URL(url).hostname + ":" + (new URL(url).port || "");
   const setCookies = typeof res.headers.getSetCookie === "function" ? res.headers.getSetCookie() : [];
   if (setCookies.length === 0) return;
+  const host = hostKey(url);
   if (!jar.has(host)) jar.set(host, new Map());
   const store = jar.get(host);
   for (const line of setCookies) {
@@ -125,8 +133,7 @@ function absorbSetCookies(jar, url, res) {
 }
 
 function jarHasCookie(jar, url, name) {
-  const host = new URL(url).hostname + ":" + (new URL(url).port || "");
-  return Boolean(jar.get(host)?.has(name));
+  return Boolean(jar.get(hostKey(url))?.has(name));
 }
 
 // Single hop, manual redirect handling — never auto-follows, so we can
