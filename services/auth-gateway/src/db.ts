@@ -110,4 +110,40 @@ export async function migrate(): Promise<void> {
     END
     $$;
   `);
+  // Managed vocabulary for user_attributes' three columns — replaces free
+  // text with a per-kind list an admin can pick from (apps/admin's
+  // AttributeSelect) or extend (see the POST route in
+  // routes/adminAttributeValues.ts). `kind` is one of "department",
+  // "position", "job_level" (matches the user_attributes column names).
+  // Existing free-text values not in this list still display correctly
+  // (apps/admin shows them as an extra unlisted option) — this table only
+  // curates what's offered going forward, it doesn't constrain what's
+  // already stored.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS attribute_values (
+      id    SERIAL PRIMARY KEY,
+      kind  TEXT NOT NULL,
+      value TEXT NOT NULL,
+      UNIQUE (kind, value)
+    );
+  `);
+  // Demo seed data — includes the exact values seedDevAttributes() (in
+  // attributes.ts) assigns to dev-admin/dev-user, so the dropdown never
+  // shows those two users' own attributes as "unlisted" out of the box.
+  await pool.query(`
+    INSERT INTO attribute_values (kind, value) VALUES
+      ('department', 'Executive'),
+      ('department', 'Purchasing'),
+      ('department', 'Finance'),
+      ('department', 'Marketing'),
+      ('department', 'Operations'),
+      ('position', 'Manager'),
+      ('position', 'Staff'),
+      ('position', 'Director'),
+      ('position', 'Coordinator'),
+      ('job_level', 'Senior'),
+      ('job_level', 'Mid'),
+      ('job_level', 'Junior')
+    ON CONFLICT (kind, value) DO NOTHING;
+  `);
 }

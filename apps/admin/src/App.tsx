@@ -5,12 +5,12 @@ import {
   Button,
   ConfirmDialog,
   DataTable,
-  Input,
   Skeleton,
   ToastProvider,
   useToast,
   type DataTableColumn,
 } from "@centralhub/ui";
+import { AttributeSelect } from "./components/AttributeSelect";
 
 type AdminUser = {
   id: string;
@@ -21,6 +21,15 @@ type AdminUser = {
 
 type UserAttributes = { department: string; position: string; jobLevel: string };
 const EMPTY_ATTRS: UserAttributes = { department: "", position: "", jobLevel: "" };
+
+// Matches auth-gateway's attribute_values.kind values (snake_case, mirrors
+// the user_attributes column names) — jobLevel's kind is "job_level".
+type AttributeKind = "department" | "position" | "job_level";
+const EMPTY_ATTRIBUTE_VALUES: Record<AttributeKind, string[]> = {
+  department: [],
+  position: [],
+  job_level: [],
+};
 
 type PermissionSet = { read: boolean; write: boolean; edit: boolean; delete: boolean };
 
@@ -155,12 +164,15 @@ function UsersPanel() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [ownId, setOwnId] = useState<string | null>(null);
   const [revokeTarget, setRevokeTarget] = useState<AdminUser | null>(null);
-  // Drafts, keyed by user id — edited locally as the admin types, saved on
-  // blur (not per-keystroke). Required fields (department/position/
-  // jobLevel), enforced client-side by refusing to save while any is
-  // blank — these feed apps/assets's (and any future app's) identity ->
+  // Drafts, keyed by user id — each AttributeSelect change saves
+  // immediately (see handleAttrChange below). Required fields (department/
+  // position/jobLevel), enforced client-side by refusing to save while any
+  // is blank — these feed apps/assets's (and any future app's) identity ->
   // role_code mapping, see services/auth-gateway/src/attributes.ts.
   const [attrDrafts, setAttrDrafts] = useState<Record<string, UserAttributes>>({});
+  const [attributeValues, setAttributeValues] = useState<Record<AttributeKind, string[]>>(
+    EMPTY_ATTRIBUTE_VALUES,
+  );
   const toast = useToast();
 
   useEffect(() => {
@@ -183,14 +195,15 @@ function UsersPanel() {
     fetch("/auth/admin/users/attributes", { credentials: "same-origin" })
       .then((res) => (res.ok ? (res.json() as Promise<Record<string, UserAttributes>>) : {}))
       .then(setAttrDrafts);
+
+    (["department", "position", "job_level"] as const).forEach((kind) => {
+      fetch(`/auth/admin/attribute-values/${kind}`, { credentials: "same-origin" })
+        .then((res) => (res.ok ? (res.json() as Promise<string[]>) : []))
+        .then((values) => setAttributeValues((prev) => ({ ...prev, [kind]: values })));
+    });
   }, []);
 
-  function editAttr(userId: string, field: keyof UserAttributes, value: string) {
-    setAttrDrafts((prev) => ({ ...prev, [userId]: { ...(prev[userId] ?? EMPTY_ATTRS), [field]: value } }));
-  }
-
-  async function saveAttrs(userId: string) {
-    const draft = attrDrafts[userId] ?? EMPTY_ATTRS;
+  async function saveAttrs(userId: string, draft: UserAttributes) {
     if (!draft.department.trim() || !draft.position.trim() || !draft.jobLevel.trim()) return;
     try {
       const res = await fetch(`/auth/admin/users/${userId}/attributes`, {
@@ -204,6 +217,36 @@ function UsersPanel() {
       toast.show({
         tone: "danger",
         title: "Couldn't save attributes",
+        description: (err as Error).message,
+      });
+    }
+  }
+
+  // Select changes are already a discrete, complete edit (unlike each
+  // keystroke in a text input) — save immediately instead of waiting for
+  // blur. Passes the merged draft straight through since the setAttrDrafts
+  // update below hasn't landed in state yet at this point in the function.
+  function handleAttrChange(userId: string, field: keyof UserAttributes, value: string) {
+    const next = { ...(attrDrafts[userId] ?? EMPTY_ATTRS), [field]: value };
+    setAttrDrafts((prev) => ({ ...prev, [userId]: next }));
+    void saveAttrs(userId, next);
+  }
+
+  async function addAttributeValue(kind: AttributeKind, value: string) {
+    try {
+      const res = await fetch(`/auth/admin/attribute-values/${kind}`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ value }),
+      });
+      if (!res.ok) throw new Error(`${res.status}`);
+      const values = (await res.json()) as string[];
+      setAttributeValues((prev) => ({ ...prev, [kind]: values }));
+    } catch (err) {
+      toast.show({
+        tone: "danger",
+        title: "Couldn't add value",
         description: (err as Error).message,
       });
     }
@@ -258,12 +301,12 @@ function UsersPanel() {
       key: "department",
       header: "Department",
       render: (user) => (
-        <Input
+        <AttributeSelect
           value={attrDrafts[user.id]?.department ?? ""}
-          placeholder="Required"
-          className="h-8 w-28"
-          onChange={(e) => editAttr(user.id, "department", e.target.value)}
-          onBlur={() => saveAttrs(user.id)}
+          options={attributeValues.department}
+          placeholder="Select department"
+          onChange={(value) => handleAttrChange(user.id, "department", value)}
+          onAddOption={(value) => addAttributeValue("department", value)}
         />
       ),
     },
@@ -271,12 +314,12 @@ function UsersPanel() {
       key: "position",
       header: "Position",
       render: (user) => (
-        <Input
+        <AttributeSelect
           value={attrDrafts[user.id]?.position ?? ""}
-          placeholder="Required"
-          className="h-8 w-28"
-          onChange={(e) => editAttr(user.id, "position", e.target.value)}
-          onBlur={() => saveAttrs(user.id)}
+          options={attributeValues.position}
+          placeholder="Select position"
+          onChange={(value) => handleAttrChange(user.id, "position", value)}
+          onAddOption={(value) => addAttributeValue("position", value)}
         />
       ),
     },
@@ -284,12 +327,12 @@ function UsersPanel() {
       key: "jobLevel",
       header: "Job level",
       render: (user) => (
-        <Input
+        <AttributeSelect
           value={attrDrafts[user.id]?.jobLevel ?? ""}
-          placeholder="Required"
-          className="h-8 w-28"
-          onChange={(e) => editAttr(user.id, "jobLevel", e.target.value)}
-          onBlur={() => saveAttrs(user.id)}
+          options={attributeValues.job_level}
+          placeholder="Select job level"
+          onChange={(value) => handleAttrChange(user.id, "jobLevel", value)}
+          onAddOption={(value) => addAttributeValue("job_level", value)}
         />
       ),
     },

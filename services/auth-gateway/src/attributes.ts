@@ -40,6 +40,28 @@ export async function upsertUserAttributes(userSub: string, attrs: UserAttribute
   );
 }
 
+export type AttributeKind = "department" | "position" | "job_level";
+const ATTRIBUTE_KINDS: readonly AttributeKind[] = ["department", "position", "job_level"];
+
+export function isAttributeKind(kind: string): kind is AttributeKind {
+  return (ATTRIBUTE_KINDS as readonly string[]).includes(kind);
+}
+
+export async function listAttributeValues(kind: AttributeKind): Promise<string[]> {
+  const result = await pool.query<{ value: string }>(
+    "SELECT value FROM attribute_values WHERE kind = $1 ORDER BY value",
+    [kind],
+  );
+  return result.rows.map((row) => row.value);
+}
+
+export async function addAttributeValue(kind: AttributeKind, value: string): Promise<void> {
+  await pool.query(
+    "INSERT INTO attribute_values (kind, value) VALUES ($1, $2) ON CONFLICT (kind, value) DO NOTHING",
+    [kind, value],
+  );
+}
+
 export type AppRoleRule = {
   id: number;
   appId: string;
