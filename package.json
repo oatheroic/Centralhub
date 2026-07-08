@@ -19,6 +19,7 @@
     "lint": "pnpm -r lint",
     "stack:up": "docker compose -f environments/docker-compose.yml --env-file environments/.env up --build",
     "stack:down": "docker compose -f environments/docker-compose.yml down",
-    "stack:logs": "docker compose -f environments/docker-compose.yml logs -f"
+    "stack:logs": "docker compose -f environments/docker-compose.yml logs -f",
+    "test:stack": "node scripts/test-stack.mjs"
   }
 }
