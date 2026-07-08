@@ -295,6 +295,16 @@ CentralHub/
     server-side (400) and by hiding the button on the logged-in admin's own
     row — since there's no recovery path in this UI if an admin locked
     themselves out.
+  - **Background role re-sync poller** (`services/auth-gateway/src/roleSyncPoller.ts`):
+    every `ROLE_SYNC_INTERVAL_MS` (default 60s), re-runs the same
+    `syncRolesFromKeycloak()` used at login for every user returned by
+    `listUsers()`. Since `user_roles` (not the JWT) is already the sole,
+    live-checked source of truth for role checks, this alone is enough to
+    self-correct a role changed directly in Keycloak's console — no force-
+    logout or session revocation needed on top of it. Fails soft: a
+    Keycloak Admin API error (restart, network blip) is logged and skipped,
+    never crashes the gateway or stops future ticks — same posture as the
+    dev-seeding retries at boot.
   - **Keycloak backchannel logout** (event-driven, not polled — built into
     Keycloak, configured via the `auth-gateway` client's
     `backchannel.logout.url` attribute in `realm-export.json`): when an admin
@@ -305,8 +315,9 @@ CentralHub/
     route is deliberately public and outside Nginx's `auth_request` gate —
     Keycloak calls it server-to-server over the Docker network, no browser
     or cookie involved.
-- **Status**: done (Phase 5) — role checks, force-logout, and the
-  backchannel-logout webhook are all wired and verified end-to-end.
+- **Status**: done (Phase 5) — role checks, force-logout, the
+  backchannel-logout webhook, and the background role re-sync poller are
+  all wired and verified end-to-end.
 - **A revoked/unverifiable session is modeled as 401, not 403.** 403 means
   "valid session, but not permitted THIS resource" — app read-denied or
   admin-role-missing — and Nginx's `@permission_denied` page for that
@@ -341,12 +352,10 @@ CentralHub/
   - Disabling a user in Keycloak's console, by itself, does **not** end
     their live SSO session or fire backchannel logout — only the Sessions
     tab's explicit "Logout" action (or the Admin REST logout endpoint) does.
-  - A role change made directly in Keycloak's console **without** an
-    accompanying session logout isn't picked up until that user's JWT
-    naturally expires or an admin explicitly force-logs them out (via the
-    `apps/admin` button, or Keycloak's own console). There is no background
-    poller re-syncing roles for still-active sessions — see the deferred
-    item in §13.
+  - A role change made directly in Keycloak's console is now picked up
+    within one `ROLE_SYNC_INTERVAL_MS` tick (default 60s) by the background
+    poller above — an explicit force-logout is no longer required to see it
+    take effect, just a short wait.
 
 ---
 
@@ -394,9 +403,60 @@ CentralHub/
   untouched — a separate, already-deferred cleanup, not part of this pass.
 - **Status**: done — shared foundation, admin panel, and landing page/
   department-app rollout all complete; every app in the repo is now on
-  `packages/ui`. Grouping/"recently used" row and an announcement banner
-  (both explicitly Low-priority, optional) remain deferred — 4 apps doesn't
-  earn grouping's keep yet.
+  `packages/ui`. Grouping and a dismissible announcement banner (previously
+  deferred as Low-priority/optional) have since been added to
+  `apps/central-hub`:
+  - **Department grouping + "recently used"**: the landing grid now renders
+    as per-department sections (reusing the same `departments` list already
+    driving the filter tabs) instead of one flat grid, plus a "Recently
+    used" section (`apps/central-hub/src/lib/recentApps.ts`, a capped
+    localStorage list of the last 4 apps opened, recorded from
+    `AppCard`'s click handler). Both only render on the unfiltered "All"
+    view with no search text — once a department or search filter narrows
+    the list, grouping/recency would just add noise on top of an
+    already-short list.
+  - **Announcement banner**: `apps/central-hub/src/components/SystemBanner.tsx`,
+    dismissible and remembered per-announcement-id in localStorage (so
+    bumping the id in `apps/central-hub/src/config/announcement.ts`
+    re-surfaces a changed message to users who dismissed an earlier one).
+    The config constant defaults to `null` (nothing shown) — still no
+    operator need for an actual announcement yet, but the plumbing is done.
+  - **Dark mode, defaulted on, every app**: `packages/ui/src/theme.ts` —
+    framework-agnostic on purpose, no React import — reads/writes one
+    `chub_theme` localStorage key and toggles the `dark`/`light` class on
+    `<html>`. Since every app is served from the same gateway origin
+    (`localhost:8080`), that one key is naturally shared across all of
+    them — switching the theme in any app carries over to the rest on
+    their next load. A browser with no stored preference yet always starts
+    **dark**, regardless of the OS's own `prefers-color-scheme` (tokens.css's
+    `.dark` class forces the dark variable set unconditionally). Each app's
+    `main.tsx` calls `applyTheme(getStoredTheme())` before the first render
+    (not inside a `useEffect`), so there's no flash of the light default
+    before dark applies. `packages/ui`'s `ThemeToggle` (Sun/Moon icon
+    button, built on the same `theme.ts`) sits at the top-right of
+    `AppShell`'s header (admin/marketing/finance/`_template`) and of
+    `central-hub`'s own bespoke header. `apps/assets` can't import
+    `ThemeToggle` itself — its React 19 vs. this package's React
+    ^18.3.1 peer dep, same reason `AssetsNav.tsx` hand-authors its own
+    chrome instead of importing `AppShell` — so `theme.ts` is also
+    published as its own React-free `@centralhub/ui/theme` subpath export,
+    and `AssetsNav.tsx` hand-authors a matching toggle button at its own
+    top-right, styled with the same shared CSS tokens the rest of its nav
+    already uses. `apps/assets`'s own `styles.css` already shipped a full
+    shadcn `.dark` palette from the original Lovable export — unused until
+    now, since nothing ever toggled the class; no CSS changes were needed
+    there, only the toggle.
+  - **Space efficiency**: `AppShell`'s content area, and `central-hub`'s own
+    equivalent container, were hard-capped at `max-w-5xl` (1024px)
+    regardless of viewport — wasted room on any screen wider than a small
+    laptop. Both are now `w-full max-w-[1600px]` with responsive padding,
+    so they use whatever width is actually available and only cap on
+    ultra-wide monitors for line-length readability; `central-hub`'s app
+    grid also gained an `xl:grid-cols-4` breakpoint so the extra width
+    shows more cards per row instead of just more margin. `apps/admin`'s
+    `AttributeSelect` (below) is `w-full` with a `min-w-[9rem]` floor for
+    the same reason — it was a fixed 112px regardless of how much room its
+    `DataTable` column actually had.
 
 ---
 
@@ -487,7 +547,8 @@ CentralHub/
   (independent of CentralHub identity) is now optional, not mandatory.
   auth-gateway owns two new, generic (not assets-specific) Postgres tables:
   `user_attributes` (`user_sub → department/position/job_level`, required
-  once set, managed from `apps/admin`'s Users panel) and `app_role_rules`
+  once set, managed from `apps/admin`'s Users panel — see "Managed
+  attribute values" below) and `app_role_rules`
   (`app_id, role_code, department?, position?, job_level?` — a `NULL`
   criteria column is a wildcard). `GET /auth/data-token` resolves the
   caller's attributes against that app's rules
@@ -518,6 +579,28 @@ CentralHub/
   by always resolving on mount and overwriting `localStorage` whenever a
   role_code matches — only falling back to whatever's already there when
   nothing resolves.
+- **Managed attribute values** (closes the "free text, no enum" gap):
+  department/position/job_level were plain required text fields — a typo
+  (e.g. "Purchasing" vs "purchasing") silently broke an `app_role_rules`
+  match with no error. A new generic `attribute_values` table
+  (`kind, value`, seeded with a handful of obvious demo values per kind —
+  see `db.ts`'s `migrate()`) backs a managed vocabulary per column instead.
+  `apps/admin`'s Users panel now renders each column as a dropdown
+  (`AttributeSelect.tsx`, built on a new `Select` primitive added to
+  `packages/ui` — the first shared dropdown in the repo, styled with a
+  custom chevron via `appearance-none` so it doesn't fall back to each
+  browser's own native arrow) sourced from
+  `GET /auth/admin/attribute-values/:kind`, with a "+ Add new..." option
+  that opens a small Radix Dialog modal (mirrors `packages/ui`'s
+  `ConfirmDialog` pattern) with an input and a Save button, and calls
+  `POST /auth/admin/attribute-values/:kind` (`routes/adminAttributeValues.ts`)
+  on confirm to extend the list in place — no separate values-management
+  screen needed. Existing free-text values not in the seed list (there are none
+  today, since the seed list includes exactly what `seedDevAttributes()`
+  assigns dev-admin/dev-user) still display correctly as an extra
+  "(unlisted)" option rather than being silently dropped. No delete
+  endpoint — removing a value an existing user is already assigned would
+  just make their attribute look unlisted with no real cleanup benefit.
 - **Verified**: a request with no token gets `401`; a valid session with
   `read: false` gets `[]` (RLS filters every row); `read: true` returns real
   seeded data; `write: false` attempting an `INSERT` gets `403` even though
@@ -528,9 +611,14 @@ CentralHub/
   and viewing a PDF, and RBAC-boundary checks (`dev-user` vs `dev-admin`).
 - **Status**: done. `storage-assets`'s bucket-metadata admin endpoint (not
   used by the app itself, which only uploads/downloads objects) still needs
-  the service key rather than a per-user JWT — tracked in §13. Department/
-  position/job level are plain required text fields, not a managed enum
-  list — a typo silently breaks a rule match; also tracked in §13.
+  the service key rather than a per-user JWT — tracked in §13. The
+  `cc_recipient` dropdown (multi-select "สำเนาถึง"/CC field) was missing
+  seed data — a gap in the original export, since only its single-select
+  `recipient` counterpart ("เรียน"/To) had rows — now seeded with the same
+  person/department pool in `20260707000000_centralhub_rls.sql`. Department/
+  position/job level, previously plain free-text fields, are now managed
+  dropdowns with admin-addable values — see "Managed attribute values"
+  above.
 
 ---
 
@@ -567,7 +655,18 @@ when adding or removing an app.
 
 ## 13. Deferred / not started (catalog)
 
-Consolidated from the sections above, so it's checkable in one place:
+Consolidated from the sections above, so it's checkable in one place. Split
+into two tables: everything specific to `apps/assets` (§10), then everything
+else.
+
+**`apps/assets`-specific**:
+
+| Item | Where it would live | Why deferred |
+|---|---|---|
+| `storage-assets` bucket-metadata admin calls | `apps/assets` self-hosted storage layer (§10) | Needs the service key, not a per-user JWT — object upload/download (what the app actually uses) is unaffected. Currently dormant: no code in `apps/assets` calls a bucket-metadata admin endpoint (the bucket is created once via SQL migration, not at runtime), so there's nothing live to break yet |
+| `apps/assets`'s workflow-role login can't be fully retired | `apps/assets` `role_assignments`/`LoginForm` | The identity→role_code mapping (§10) makes it optional, not obsolete — any user with no matching `app_role_rules` row still needs it; a hypothetical "100% coverage, no fallback" mode isn't built, and retiring it is a data-completeness question, not a code change |
+
+**General**:
 
 | Item | Where it would live | Why deferred |
 |---|---|---|
@@ -577,17 +676,10 @@ Consolidated from the sections above, so it's checkable in one place:
 | Per-record / field-level permissions | `app_permissions` table design | Current granularity is per (user, app) only |
 | Bulk permission grants | `apps/admin` Permissions panel | One-cell-at-a-time editing was sufficient for the current user count |
 | Audit log of permission/role changes | new table + admin UI | Not needed until multiple admins manage grants |
-| Background role re-sync poller | `services/auth-gateway` | Would shrink the §8 console-role-change gap from "needs a manual force-logout" to "auto-corrects in ~1 min"; adds recurring Keycloak Admin API load for a low-frequency edge case that already has a manual remedy |
 | Per-session (`jti`) tracking / "your active sessions" UI | `session_revocations` table design | Current granularity is per-user (kill all sessions), not per-device — see §8 |
 | Production-safe credentials | `keycloak/realm-export.json`, `.env` | `dev-admin`/`dev-user`/client secret are dev-only seed data — see §6, §7 |
-| Grouping by department / "recently used" row | `apps/central-hub` landing grid | Low-priority, optional per §9 — 4 apps doesn't earn grouping's keep yet |
-| Announcement/system banner | `apps/central-hub` landing page | Low-priority, optional per §9 — no operator need for it yet |
 | `usePermissions.ts`'s `window.alert()` → toast | `apps/_template`, `apps/marketing`, `apps/finance` | Duplicated across 3 files by design (§9); a real fix needs extracting the hook into `packages/ui` first, out of scope for §9's UI-primitives pass |
 | Postgres-backed dynamic app registry | replacing `apps.ts`/`KNOWN_APPS`/`docker-compose.yml`'s static lists | Deferred per §10 — not a prerequisite for onboarding one real third-party app |
-| `storage-assets` bucket-metadata admin calls | `apps/assets` self-hosted storage layer (§10) | Needs the service key, not a per-user JWT — object upload/download (what the app actually uses) is unaffected |
-| `cc_recipient` dropdown has no seed data (`recipient` does) | `apps/assets` `dropdown_options` table | Gap in the original export, not introduced by ingestion — the "สำเนาถึง" field queries a category that was never seeded; populate via the app's own "add option" UI (any user with `write`) |
-| Department/position/job level are free text, not a managed enum | `user_attributes` (auth-gateway), `apps/admin`'s Users panel | A typo (e.g. "Purchasing" vs "purchasing") silently breaks a rule match in `app_role_rules` with no error — kept simple for the identity→role_code mapping's first pass (§10); a follow-up could add autocomplete-from-existing-values or a proper managed lookup |
-| `apps/assets`'s workflow-role login can't be fully retired | `apps/assets` `role_assignments`/`LoginForm` | The identity→role_code mapping (§10) makes it optional, not obsolete — any user with no matching rule still needs it; a hypothetical "100% coverage, no fallback" mode isn't built |
 
 ---
 
@@ -650,9 +742,14 @@ pnpm stack:up
   intact. Exits non-zero with a listed summary of failures if anything
   regressed.
 - **Deliberately not covered**: anything in §13's deferred/not-started
-  catalog (MFA, per-record permissions, bulk grants, audit log, background
-  role re-sync, per-session tracking) — none of it is built, so there's
-  nothing there to assert against yet.
+  catalog (MFA, per-record permissions, bulk grants, audit log, per-session
+  tracking) — none of it is built, so there's nothing there to assert
+  against yet. The background role re-sync poller (§8) is now built but
+  also not covered here — its effect only becomes observable after waiting
+  out a full `ROLE_SYNC_INTERVAL_MS` tick, which doesn't fit this script's
+  request-per-request assertion style; verify it by hand (change a role in
+  Keycloak's console, wait out the interval, confirm the next request
+  reflects it without a force-logout).
 - **Status**: done — 65 assertions, verified to pass cleanly against a fresh
   stack and to fail with an accurate diagnostic when a permission row is
   corrupted by hand (tested by both routes: flipping the DB row directly,
@@ -666,14 +763,28 @@ pnpm stack:up
 For whoever (human or agent) picks this repo up next — what changed most
 recently, and where to look first.
 
-**What just happened**: two consecutive pieces of work, both fully built,
-tested (curl + live browser), and documented above:
-1. §10 — `apps/assets` ingested as the first third-party app, self-hosted
-   end-to-end (own Postgres/PostgREST/storage-api, no external SaaS).
-2. §10 (same section, added after) — the identity→`role_code` mapping,
-   letting a CentralHub user's department/position/job level auto-resolve
-   them into the right `apps/assets` workflow role instead of a separate
-   manual login.
+**What just happened**: a longer session, several consecutive pieces of
+work, each fully built, verified against the running Docker stack (rebuilt
++ redeployed after every change, not just typechecked), and documented
+above:
+1. §8 — the background role re-sync poller (`roleSyncPoller.ts`), carried
+   over already-finished from before this session and committed here.
+2. §10/§13 — grouped every `apps/assets`-specific deferred item into its
+   own table in §13, and closed out the `cc_recipient` dropdown's missing
+   seed data (a one-migration fix, see §10's Status bullet).
+3. §9 — `apps/central-hub` gained a dismissible announcement banner,
+   department-grouped landing grid, and a "recently used" row.
+4. §10 — department/position/job_level (the identity→`role_code` mapping's
+   inputs) went from free-text to a managed, admin-extensible vocabulary:
+   new `attribute_values` table, new auth-gateway endpoints, and a new
+   `AttributeSelect` dropdown (with an "Add new" modal) in `apps/admin`.
+5. §9 — a shared `packages/ui` `Select` primitive (first one in the repo),
+   a responsive width pass (`AppShell`/`central-hub` no longer cap at a
+   fixed 1024px on every screen), and a dark-mode default with one
+   cross-app toggle (`packages/ui/theme.ts`, `ThemeToggle`), including a
+   React-free `@centralhub/ui/theme` subpath so `apps/assets` (React 19)
+   could share the exact same logic despite the peer-dep mismatch that
+   already keeps `AssetsNav.tsx` hand-authored.
 
 **Bugs found only by actually clicking through the app in a browser** (not
 by code review or `curl` — worth remembering for future work in this repo):
@@ -692,19 +803,34 @@ own role-picker fallback login (only seen if the identity mapping doesn't
 resolve): `ADM01`/`123456` (full access), or `REQ01`/`APP01`/`AST01`/
 `PUR01`/`ACC01` with the same password for narrower roles.
 
-**Known-open items**, all cross-referenced from §13's table — read that
-table before starting new work here, it's kept current: the identity
-mapping's free-text department/position/job-level fields (typo risk, no
-enum), `apps/assets`'s own role-picker login can't be fully retired (only
-made optional), `storage-assets`'s bucket-metadata admin endpoint needs the
-service key, and the `cc_recipient` dropdown's missing seed data.
+**Known-open items**, all cross-referenced from §13's `apps/assets`-specific
+table — read that table before starting new work here, it's kept current:
+`apps/assets`'s own role-picker login can't be fully retired (only made
+optional), and `storage-assets`'s bucket-metadata admin endpoint needs the
+service key. (The `cc_recipient` dropdown's missing seed data and the
+identity mapping's free-text department/position/job-level fields were both
+closed out this session — see §10.)
+
+**One thing this session did differently — worth calling out for whoever's
+next**: every UI change was rebuilt into its actual Docker image
+(`docker compose build <service>` then `up -d <service>`) and re-verified
+against the running stack after each round, not just typechecked/built
+locally. Several rounds of user feedback only surfaced once the change was
+actually visible in the browser (icon position, font size, dropdown width)
+— typecheck-clean is necessary but wasn't sufficient on its own this
+session.
 
 **Git/environment state as of this handoff**: everything above is committed
-(not squashed — read `git log` for the real sequence, each logical step is
-its own commit, code and README always split). `environments/.env` is
-gitignored and deleted at the end of each session per this repo's own
-convention (see §3/§5) — regenerate it from `.env.example` following §14's
-Quickstart before bringing the stack back up.
+(not squashed — read `git log` for the real sequence). Given the volume and
+interleaving of changes this session — many features touched the same
+files (`AppShell.tsx`, `central-hub/App.tsx`, `README.md`) across several
+rounds of follow-up user feedback — commits are grouped by feature rather
+than strictly one-code-commit-then-one-doc-commit-per-change the way
+earlier sessions in this log did; each commit message says what it covers.
+`environments/.env` is gitignored and deleted at the end of each session
+per this repo's own convention (see §3/§5) — regenerate it from
+`.env.example` following §14's Quickstart before bringing the stack back
+up.
 
 **Temporary exception (dev period only)**: as of this handoff, `environments/.env`
 and the stack's Docker volumes (`centralhub_pgdata`, `centralhub_assets_pgdata`,
