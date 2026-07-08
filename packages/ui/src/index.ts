@@ -13,3 +13,6 @@ export { ConfirmDialog } from "./components/ConfirmDialog";
 export { AppShell } from "./components/AppShell";
 export { DataTable } from "./components/DataTable";
 export type { DataTableColumn, DataTableProps } from "./components/DataTable";
+export { ThemeToggle } from "./components/ThemeToggle";
+export { getStoredTheme, applyTheme, setStoredTheme } from "./theme";
+export type { Theme } from "./theme";

@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { ArrowLeft } from "lucide-react";
+import { ThemeToggle } from "./ThemeToggle";
 
 export function AppShell({
   title,
@@ -26,9 +27,15 @@ export function AppShell({
           <span className="text-border">/</span>
           <h1 className="text-sm font-medium text-text">{title}</h1>
         </div>
-        {actions && <div className="flex items-center gap-3">{actions}</div>}
+        <div className="flex items-center gap-3">
+          {actions}
+          <ThemeToggle />
+        </div>
       </header>
-      <main className="mx-auto max-w-5xl p-6">{children}</main>
+      {/* max-w caps line length on ultra-wide monitors; below that, w-full
+          means the content actually uses whatever room the viewport has
+          instead of stalling at a fixed 1024px on every screen size. */}
+      <main className="mx-auto w-full max-w-[1600px] p-4 sm:p-6 lg:p-8">{children}</main>
     </div>
   );
 }
