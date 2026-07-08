@@ -483,6 +483,41 @@ CentralHub/
   download — the original export's `download` attribute was a deliberate
   choice there, but nothing server-side requires it (`storage-assets` sets
   no forcing `Content-Disposition`).
+- **Identity → `role_code` mapping**: `apps/assets`'s own role-picker login
+  (independent of CentralHub identity) is now optional, not mandatory.
+  auth-gateway owns two new, generic (not assets-specific) Postgres tables:
+  `user_attributes` (`user_sub → department/position/job_level`, required
+  once set, managed from `apps/admin`'s Users panel) and `app_role_rules`
+  (`app_id, role_code, department?, position?, job_level?` — a `NULL`
+  criteria column is a wildcard). `GET /auth/data-token` resolves the
+  caller's attributes against that app's rules
+  (`services/auth-gateway/src/attributes.ts`'s `resolveRoleCode`, most-
+  specific-match-wins) and returns a `role_code` alongside the token if one
+  matches. `apps/assets` manages its own rules from a new admin panel
+  (`RoleRulesPanel.tsx` — `role_code` is this app's own vocabulary, kept out
+  of the generic `apps/admin`) and auto-logs a matching user straight into
+  the resolved role on load, skipping the picker entirely. A user with no
+  attributes set, or none of the app's rules matching, still sees the
+  picker exactly as before — nothing is mandatory. Verified end-to-end:
+  `dev-admin` (Executive/Manager/Senior) auto-resolves to `ADM01` via a
+  position-only wildcard rule; `dev-user` (Purchasing/Staff/Junior)
+  auto-resolves to `REQ01` via a separate wildcard rule matching any
+  department, mirroring the design's own goal (a role open to every
+  department still auto-grants correctly). `dev-admin`/`dev-user`'s
+  attributes and both rules are seeded automatically on boot
+  (`attributes.ts`'s `seedDevAttributes()`, same retry pattern as
+  `seedDevPermissions()`) — a fresh `docker compose up` demonstrates this
+  working without replaying the manual `curl` commands used while building
+  it.
+- **Found via live browser testing**: the auto-login effect originally
+  skipped resolution entirely whenever `apps/assets`'s own `localStorage`
+  already had a role picked — meaning a stale manual pick from an earlier,
+  unrelated Keycloak session on the same browser silently overrode the
+  correct auto-resolved role for whoever was *currently* logged in (since
+  that `localStorage` state isn't tied to Keycloak identity at all). Fixed
+  by always resolving on mount and overwriting `localStorage` whenever a
+  role_code matches — only falling back to whatever's already there when
+  nothing resolves.
 - **Verified**: a request with no token gets `401`; a valid session with
   `read: false` gets `[]` (RLS filters every row); `read: true` returns real
   seeded data; `write: false` attempting an `INSERT` gets `403` even though
@@ -493,9 +528,9 @@ CentralHub/
   and viewing a PDF, and RBAC-boundary checks (`dev-user` vs `dev-admin`).
 - **Status**: done. `storage-assets`'s bucket-metadata admin endpoint (not
   used by the app itself, which only uploads/downloads objects) still needs
-  the service key rather than a per-user JWT — tracked in §13. The app's own
-  role-picker login (independent of CentralHub identity, see above) is a
-  separate, deferred design question — also tracked in §13.
+  the service key rather than a per-user JWT — tracked in §13. Department/
+  position/job level are plain required text fields, not a managed enum
+  list — a typo silently breaks a rule match; also tracked in §13.
 
 ---
 
@@ -550,8 +585,9 @@ Consolidated from the sections above, so it's checkable in one place:
 | `usePermissions.ts`'s `window.alert()` → toast | `apps/_template`, `apps/marketing`, `apps/finance` | Duplicated across 3 files by design (§9); a real fix needs extracting the hook into `packages/ui` first, out of scope for §9's UI-primitives pass |
 | Postgres-backed dynamic app registry | replacing `apps.ts`/`KNOWN_APPS`/`docker-compose.yml`'s static lists | Deferred per §10 — not a prerequisite for onboarding one real third-party app |
 | `storage-assets` bucket-metadata admin calls | `apps/assets` self-hosted storage layer (§10) | Needs the service key, not a per-user JWT — object upload/download (what the app actually uses) is unaffected |
-| Map CentralHub identity → `role_code` via department/position, replacing `apps/assets`'s own role-code login | `apps/assets` (§10), possibly a new user_sub → role_code table, or a new Keycloak user attribute | Ties workflow actions to the actual logged-in person instead of a shared department password; mapping source (Keycloak attribute vs. a new CentralHub-side table) not yet decided — approach planning deferred to next session |
 | `cc_recipient` dropdown has no seed data (`recipient` does) | `apps/assets` `dropdown_options` table | Gap in the original export, not introduced by ingestion — the "สำเนาถึง" field queries a category that was never seeded; populate via the app's own "add option" UI (any user with `write`) |
+| Department/position/job level are free text, not a managed enum | `user_attributes` (auth-gateway), `apps/admin`'s Users panel | A typo (e.g. "Purchasing" vs "purchasing") silently breaks a rule match in `app_role_rules` with no error — kept simple for the identity→role_code mapping's first pass (§10); a follow-up could add autocomplete-from-existing-values or a proper managed lookup |
+| `apps/assets`'s workflow-role login can't be fully retired | `apps/assets` `role_assignments`/`LoginForm` | The identity→role_code mapping (§10) makes it optional, not obsolete — any user with no matching rule still needs it; a hypothetical "100% coverage, no fallback" mode isn't built |
 
 ---
 
@@ -560,7 +596,11 @@ Consolidated from the sections above, so it's checkable in one place:
 ```sh
 pnpm install
 cp environments/.env.example environments/.env
-# fill in ANTHROPIC_API_KEY, POSTGRES_PASSWORD, KEYCLOAK_ADMIN_PASSWORD, AUTH_SESSION_SECRET
+# fill in every blank value in .env.example: ANTHROPIC_API_KEY (or switch
+# INFERENCE_PROVIDER=local), POSTGRES_PASSWORD, KEYCLOAK_ADMIN_PASSWORD,
+# AUTH_SESSION_SECRET, and (since §10) ASSETS_DB_PASSWORD, PGRST_JWT_SECRET,
+# ASSETS_STORAGE_ANON_KEY, ASSETS_STORAGE_SERVICE_KEY — the last two are
+# HS256 JWTs signed with PGRST_JWT_SECRET, see .env.example's own comments
 pnpm stack:up
 # open http://localhost:8080/
 
@@ -576,3 +616,50 @@ pnpm stack:up
 # /apps/admin/'s user list as dev-admin — their very next request anywhere
 # gets a 403, no waiting for the 8h session to expire
 ```
+
+---
+
+## 15. Session handoff notes
+
+For whoever (human or agent) picks this repo up next — what changed most
+recently, and where to look first.
+
+**What just happened**: two consecutive pieces of work, both fully built,
+tested (curl + live browser), and documented above:
+1. §10 — `apps/assets` ingested as the first third-party app, self-hosted
+   end-to-end (own Postgres/PostgREST/storage-api, no external SaaS).
+2. §10 (same section, added after) — the identity→`role_code` mapping,
+   letting a CentralHub user's department/position/job level auto-resolve
+   them into the right `apps/assets` workflow role instead of a separate
+   manual login.
+
+**Bugs found only by actually clicking through the app in a browser** (not
+by code review or `curl` — worth remembering for future work in this repo):
+`vite.config.ts` missing `base: "/apps/assets/"` (blank page), missing
+`GRANT USAGE ON SCHEMA storage` for two different Postgres role sets
+(uploads/bucket-metadata 500ing with a misleading "relation does not
+exist"), and the auto-login effect not overriding stale `localStorage`
+state from an earlier, different Keycloak session. All three are described
+in full, with root-cause detail, in §10 above — read it before touching
+`apps/assets` again, the same classes of bug are easy to reintroduce.
+
+**Local dev credentials** (all dev-only, seeded automatically on
+`docker compose up`, safe to commit): Keycloak login `dev-admin`/
+`devadmin123` (admin realm role) and `dev-user`/`devuser123`. `apps/assets`'s
+own role-picker fallback login (only seen if the identity mapping doesn't
+resolve): `ADM01`/`123456` (full access), or `REQ01`/`APP01`/`AST01`/
+`PUR01`/`ACC01` with the same password for narrower roles.
+
+**Known-open items**, all cross-referenced from §13's table — read that
+table before starting new work here, it's kept current: the identity
+mapping's free-text department/position/job-level fields (typo risk, no
+enum), `apps/assets`'s own role-picker login can't be fully retired (only
+made optional), `storage-assets`'s bucket-metadata admin endpoint needs the
+service key, and the `cc_recipient` dropdown's missing seed data.
+
+**Git/environment state as of this handoff**: everything above is committed
+(not squashed — read `git log` for the real sequence, each logical step is
+its own commit, code and README always split). `environments/.env` is
+gitignored and deleted at the end of each session per this repo's own
+convention (see §3/§5) — regenerate it from `.env.example` following §14's
+Quickstart before bringing the stack back up.
