@@ -619,6 +619,48 @@ pnpm stack:up
 
 ---
 
+## 16. Automated end-to-end test (`scripts/test-stack.mjs`)
+
+- **Objective**: a single command that exercises every pillar above against
+  a real running stack — no mocks, no headless browser dependency — so a
+  regression in auth, RBAC, revocation, or the assets RLS layer fails loudly
+  instead of waiting to be found by hand in a browser.
+- **What it does**: plain Node `fetch` (no test framework, no extra
+  dependencies) drives the actual Keycloak Authorization Code flow — GET
+  `/auth/login`, parse the returned Keycloak login form, POST real dev
+  credentials, follow the redirect chain through `/auth/callback` — for both
+  `dev-admin` and `dev-user`, then asserts against the live gateway/
+  auth-gateway/PostgREST stack: unauthenticated gating, role resolution,
+  Nginx's per-app read gate, `/auth/permissions` verb flags, the admin-only
+  management APIs, `apps/assets`'s data-token minting and identity→role_code
+  resolution, real RLS enforcement over `POST/PATCH/DELETE` (including
+  flipping a permission via the real admin endpoint mid-run to prove
+  `write:false` → `403` on INSERT, then restoring it), instant session
+  revocation, and logout (including that Keycloak's `prompt=login` actually
+  forces a fresh credential challenge, not a silent SSO bypass).
+- **Nginx gotcha it specifically guards against**: `error_page 403 =
+  @permission_denied` (no explicit status code) means a *denied* app page
+  and a *granted* one both come back as HTTP 200 — the denial is only
+  visible in the response body. Every "granted" assertion in the script
+  checks the body doesn't contain the denial page's marker text, not just
+  the status code, or a broken permission check would silently read as a
+  pass.
+- **Run it**: `pnpm test:stack` (or `node scripts/test-stack.mjs`) against an
+  already-running stack (`pnpm stack:up`), with the default dev seed data
+  intact. Exits non-zero with a listed summary of failures if anything
+  regressed.
+- **Deliberately not covered**: anything in §13's deferred/not-started
+  catalog (MFA, per-record permissions, bulk grants, audit log, background
+  role re-sync, per-session tracking) — none of it is built, so there's
+  nothing there to assert against yet.
+- **Status**: done — 65 assertions, verified to pass cleanly against a fresh
+  stack and to fail with an accurate diagnostic when a permission row is
+  corrupted by hand (tested by both routes: flipping the DB row directly,
+  and confirming the script's own "granted" checks catch a false-200 from
+  the Nginx gotcha above).
+
+---
+
 ## 15. Session handoff notes
 
 For whoever (human or agent) picks this repo up next — what changed most
@@ -663,3 +705,12 @@ its own commit, code and README always split). `environments/.env` is
 gitignored and deleted at the end of each session per this repo's own
 convention (see §3/§5) — regenerate it from `.env.example` following §14's
 Quickstart before bringing the stack back up.
+
+**Temporary exception (dev period only)**: as of this handoff, `environments/.env`
+and the stack's Docker volumes (`centralhub_pgdata`, `centralhub_assets_pgdata`,
+`centralhub_assets_storage`) are being left in place across sessions instead of
+being torn down, so `pnpm stack:up`/`down` don't repeatedly rebuild Postgres and
+re-run every migration from empty volumes while §16's test script and other
+day-to-day work are still iterating. This is scaffolding-phase convenience, not
+a policy change — revert to the delete-`.env`-each-session convention (§3/§5)
+once the stack stabilizes, and definitely before any real/shared deployment.
