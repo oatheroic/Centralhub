@@ -19,7 +19,7 @@ small, mechanical, well-documented change — never a rearchitecture.
 | 3 | Real authentication (Keycloak + auth-gateway) + admin gate | Done |
 | 4 | Granular per-app RBAC (read/write/edit/delete) | Done (foundational) |
 | 5 | Instant session/role revocation | Done |
-| — | Real per-app backends, production hardening | Not started (see §11) |
+| — | Real per-app backends, production hardening | Not started (see §13) |
 
 ---
 
@@ -32,8 +32,13 @@ CentralHub/
 │   ├── central-hub/           # Landing dashboard, served at gateway root (/)
 │   ├── marketing/              # Department app
 │   ├── finance/                # Department app
-│   └── admin/                  # User list + user × app permissions matrix editor,
-│                                # gated by the admin realm role
+│   ├── admin/                   # User list + user × app permissions matrix editor,
+│   │                             # gated by the admin realm role
+│   └── assets/                  # First third-party app (§10) — Lovable export, now a
+│                                  # static SPA with its own self-hosted Postgres/
+│                                  # PostgREST/storage-api (assets-db, postgrest-assets,
+│                                  # storage-assets in docker-compose.yml), not a shared
+│                                  # database or a cloud dependency
 ├── packages/
 │   └── ui/                    # Shared design tokens, Tailwind preset, and React
 │                                # primitives (§9) — consumed via workspace:*
@@ -341,7 +346,7 @@ CentralHub/
     naturally expires or an admin explicitly force-logs them out (via the
     `apps/admin` button, or Keycloak's own console). There is no background
     poller re-syncing roles for still-active sessions — see the deferred
-    item in §11.
+    item in §13.
 
 ---
 
@@ -395,7 +400,106 @@ CentralHub/
 
 ---
 
-## 10. Apps in this repo
+## 10. Third-party app ingestion (`apps/assets`)
+
+- **Objective**: onboarding an externally-built app (a Lovable/similar export)
+  should end with it running entirely on our own infrastructure — no ongoing
+  dependency on the SaaS backend it was built against — while still being a
+  small, mechanical, well-documented change, matching every other pillar's bar.
+- **What came in**: `apps/assets` is a real Lovable export — TanStack Start
+  (SSR) on React 19/Tailwind v4, its own Supabase Auth wiring (unused in
+  practice — the app's actual login called a Postgres RPC directly, not
+  Supabase Auth), and all data/files on a hosted Supabase project. Every RLS
+  policy in its 28 migrations was `USING (true)`/`WITH CHECK (true)` — enabled
+  but enforcing nothing; the (public, bundle-embedded) anon key alone could
+  read/write/delete any row.
+- **Architecture — self-host the Supabase-shaped API, not a rewrite**:
+  `@supabase/supabase-js`'s Postgres client is a REST client against
+  **PostgREST**; its Storage client is a client against Supabase's own
+  **`storage-api`** — both independently self-hostable. So the app's ~31
+  feature components needed no rewrite, only reconfiguration:
+  - `assets-db` — a dedicated Postgres, sibling to `db` (which backs
+    Keycloak), not a shared schema — every third-party app gets its own.
+  - `postgrest-assets` — PostgREST in front of `assets-db`, verifying a
+    bearer JWT itself (`PGRST_JWT_SECRET`, shared with auth-gateway) and
+    exposing its claims to Postgres as `request.jwt.claims`.
+  - `storage-assets` — `supabase/storage-api`, file-system backend (a Docker
+    volume, not S3), so `supabase.storage.from(...)` calls in the app work
+    unmodified.
+  - `services/auth-gateway/src/routes/dataToken.ts` — `GET /auth/data-token`
+    mints a short-lived JWT from the caller's existing `app_permissions` row
+    (the same read/write/edit/delete model every app already uses), signed
+    with `PGRST_JWT_SECRET`. PostgREST/storage-api can't participate in
+    Nginx's cookie-based `auth_request` — they need the actual permission
+    claims to enforce RLS, not a yes/no — so this is the one place a session
+    gets translated into a token an external process verifies on its own.
+  - `apps/assets/supabase/migrations/20260707000000_centralhub_rls.sql` —
+    rewrites every `USING (true)` policy into a real check against the
+    minted JWT's claims. Applied by a one-shot `assets-migrate` service
+    (`apps/assets/scripts/migrate.sh`) after `storage-assets` has bootstrapped
+    its own `storage` schema — the exported migrations' `storage.*`
+    statements are stripped from the earlier pass for exactly that ordering
+    reason, and re-created here instead. Idempotent: safe to rerun against
+    an already-migrated volume (e.g. a container restart).
+  - Runtime shape: converted from TanStack Start (SSR, Cloudflare Workers
+    target) to a static Vite SPA behind Nginx — matching every other app's
+    Dockerfile exactly. Justified by the RLS finding above: there was no
+    privileged server-side logic worth preserving, and the app's one SSR
+    route added nothing beyond proxying an already-public storage object.
+  - Design system: kept its own Tailwind v4/shadcn/React 19 stack internally
+    (its React peer would conflict with `packages/ui`'s `^18.3.1`) — only
+    `AssetsNav` (`apps/assets/src/components/AssetsNav.tsx`) shares chrome
+    with the rest of the hub, by importing `packages/ui/src/tokens.css`
+    directly (plain CSS custom properties, framework-agnostic) rather than
+    any compiled component.
+  - Registry: wired in via the existing static lists (`apps.ts`,
+    `KNOWN_APPS`, `docker-compose.yml`) — a Postgres-backed dynamic registry
+    remains a deferred, separate future phase (see §13), not a prerequisite
+    for onboarding one real app.
+  - `vite.config.ts` sets `base: "/apps/assets/"`, same as every other app —
+    easy to miss (the default is `/`) since a missing `base` still builds
+    and serves fine locally; it only breaks once proxied under a path
+    prefix, as a blank page (bundle 404s silently).
+- **Storage-schema visibility, found via live browser testing**:
+  `storage-api` does a per-request Postgres role switch
+  (`SELECT set_config('role', '<role>', true)`, the same mechanism
+  PostgREST uses) to enforce its own checks — a role switch does **not**
+  carry schema visibility with it. Without `GRANT USAGE ON SCHEMA storage`
+  for the switched-to role, every `storage.*` query fails with a misleading
+  "relation does not exist" (not "permission denied"), since the parser
+  can't resolve an invisible object. Two separate role sets needed the
+  grant: `storage-api`'s own bootstrap roles (`anon`/`authenticated`/
+  `service_role`) **and** the role real end-user requests actually carry
+  (`assets_authenticated`, from `/auth/data-token`) — missing either one
+  breaks a different operation (bucket metadata vs. object upload). Both are
+  in `20260707000000_centralhub_rls.sql`; root-caused by enabling Postgres
+  statement logging and watching a live 500 in real time.
+- **UX**: `apps/assets`'s own "Log out" button (inside `RoleSwitcher`) was
+  removed — it only cleared the app's local role-picker state (see below),
+  not the CentralHub session, and having two different-behaving logout
+  buttons was confusing. Logout is CentralHub's job (via `AssetsNav` /
+  central-hub), not something a third-party app duplicates. PDFs now open
+  inline in a new tab (browser's native viewer) instead of forcing a
+  download — the original export's `download` attribute was a deliberate
+  choice there, but nothing server-side requires it (`storage-assets` sets
+  no forcing `Content-Disposition`).
+- **Verified**: a request with no token gets `401`; a valid session with
+  `read: false` gets `[]` (RLS filters every row); `read: true` returns real
+  seeded data; `write: false` attempting an `INSERT` gets `403` even though
+  authenticated — the `USING (true)` gap is closed, not just moved. Full
+  login → `/auth/data-token` → gateway-proxied `postgrest-assets` chain
+  verified end-to-end against a real Keycloak session, plus a full live
+  browser pass: login, role-picker login, submitting a request, uploading
+  and viewing a PDF, and RBAC-boundary checks (`dev-user` vs `dev-admin`).
+- **Status**: done. `storage-assets`'s bucket-metadata admin endpoint (not
+  used by the app itself, which only uploads/downloads objects) still needs
+  the service key rather than a per-user JWT — tracked in §13. The app's own
+  role-picker login (independent of CentralHub identity, see above) is a
+  separate, deferred design question — also tracked in §13.
+
+---
+
+## 11. Apps in this repo
 
 | App | Package | URL | Purpose |
 |---|---|---|---|
@@ -404,6 +508,7 @@ CentralHub/
 | `apps/marketing` | `@apps/marketing` | `/apps/marketing/` | Placeholder department app; demo RBAC-guarded "Save campaign" action. |
 | `apps/finance` | `@apps/finance` | `/apps/finance/` | Placeholder department app; demo RBAC-guarded "Approve budget" action. |
 | `apps/admin` | `@apps/admin` | `/apps/admin/` | Keycloak user list (with a per-user "Revoke session" action, §8, now confirm-gated, §9) + permissions matrix editor (§7). Linked from `central-hub`'s landing grid only for users holding the `admin` role (§9) — that's a discoverability nicety, not the real protection: the `admin`-role Nginx gate is what actually stops access. |
+| `apps/assets` | `@apps/assets` | `/apps/assets/` | First third-party/self-hosted app (§10) — asset purchase requests, registration, transfers; its own Postgres/PostgREST/storage-api, no external SaaS dependency. |
 
 This table is maintained by hand alongside `apps/central-hub/src/registry/apps.ts`
 and `services/auth-gateway/src/permissions.ts`'s `KNOWN_APPS` — update all three
@@ -411,7 +516,7 @@ when adding or removing an app.
 
 ---
 
-## 11. The inference swap
+## 12. The inference swap
 
 - **Objective**: moving from cloud Claude to a local model must be an env
   change, never a code change.
@@ -425,7 +530,7 @@ when adding or removing an app.
 
 ---
 
-## 12. Deferred / not started (catalog)
+## 13. Deferred / not started (catalog)
 
 Consolidated from the sections above, so it's checkable in one place:
 
@@ -443,10 +548,14 @@ Consolidated from the sections above, so it's checkable in one place:
 | Grouping by department / "recently used" row | `apps/central-hub` landing grid | Low-priority, optional per §9 — 4 apps doesn't earn grouping's keep yet |
 | Announcement/system banner | `apps/central-hub` landing page | Low-priority, optional per §9 — no operator need for it yet |
 | `usePermissions.ts`'s `window.alert()` → toast | `apps/_template`, `apps/marketing`, `apps/finance` | Duplicated across 3 files by design (§9); a real fix needs extracting the hook into `packages/ui` first, out of scope for §9's UI-primitives pass |
+| Postgres-backed dynamic app registry | replacing `apps.ts`/`KNOWN_APPS`/`docker-compose.yml`'s static lists | Deferred per §10 — not a prerequisite for onboarding one real third-party app |
+| `storage-assets` bucket-metadata admin calls | `apps/assets` self-hosted storage layer (§10) | Needs the service key, not a per-user JWT — object upload/download (what the app actually uses) is unaffected |
+| Map CentralHub identity → `role_code` via department/position, replacing `apps/assets`'s own role-code login | `apps/assets` (§10), possibly a new user_sub → role_code table, or a new Keycloak user attribute | Ties workflow actions to the actual logged-in person instead of a shared department password; mapping source (Keycloak attribute vs. a new CentralHub-side table) not yet decided — approach planning deferred to next session |
+| `cc_recipient` dropdown has no seed data (`recipient` does) | `apps/assets` `dropdown_options` table | Gap in the original export, not introduced by ingestion — the "สำเนาถึง" field queries a category that was never seeded; populate via the app's own "add option" UI (any user with `write`) |
 
 ---
 
-## 13. Quickstart
+## 14. Quickstart
 
 ```sh
 pnpm install
