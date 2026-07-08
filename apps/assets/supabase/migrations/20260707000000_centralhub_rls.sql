@@ -203,3 +203,19 @@ DROP POLICY IF EXISTS "centralhub update asset-images" ON storage.objects;
 CREATE POLICY "centralhub update asset-images" ON storage.objects FOR UPDATE USING (bucket_id = 'asset-images' AND public.centralhub_perm('edit'));
 DROP POLICY IF EXISTS "centralhub delete asset-images" ON storage.objects;
 CREATE POLICY "centralhub delete asset-images" ON storage.objects FOR DELETE USING (bucket_id = 'asset-images' AND public.centralhub_perm('delete'));
+
+-- Seed cc_recipients (สำเนาถึง) — a gap in the original export: 'recipient'
+-- (เรียน, single-select) was seeded but 'cc_recipient' (multi-select) never
+-- was, leaving the CC field with an empty option list. Same person/
+-- department pool as 'recipient'. ON CONFLICT DO NOTHING since this file
+-- reruns against already-migrated volumes (see migrate.sh).
+INSERT INTO public.dropdown_options (category, value, sort_order) VALUES
+('cc_recipient', 'คุณปราณี ทัศวิชัย', 1),
+('cc_recipient', 'คุณปวิตรา ทัศวิชัย', 2),
+('cc_recipient', 'คุณอนณ ทัศวิชัย', 3),
+('cc_recipient', 'คุณสุทัตตา ทัศวิชัย', 4),
+('cc_recipient', 'คุณชัยณรงค์ คงวุ่น', 5),
+('cc_recipient', 'แผนกทรัพย์สิน', 6),
+('cc_recipient', 'แผนกจัดซื้อ', 7),
+('cc_recipient', 'แผนกบัญชี', 8)
+ON CONFLICT (category, value) DO NOTHING;
