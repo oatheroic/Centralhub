@@ -3,6 +3,7 @@ import cookieParser from "cookie-parser";
 import { config } from "./config.js";
 import { migrate } from "./db.js";
 import { seedDevPermissions } from "./permissions.js";
+import { seedDevAttributes } from "./attributes.js";
 import { loginRouter } from "./routes/login.js";
 import { callbackRouter } from "./routes/callback.js";
 import { sessionRouter } from "./routes/session.js";
@@ -10,6 +11,8 @@ import { logoutRouter } from "./routes/logout.js";
 import { adminUsersRouter } from "./routes/adminUsers.js";
 import { adminPermissionsRouter } from "./routes/adminPermissions.js";
 import { adminSessionsRouter } from "./routes/adminSessions.js";
+import { adminAttributesRouter } from "./routes/adminAttributes.js";
+import { adminRoleRulesRouter } from "./routes/adminRoleRules.js";
 import { backchannelLogoutRouter } from "./routes/backchannelLogout.js";
 import { deniedRouter } from "./routes/denied.js";
 import { dataTokenRouter } from "./routes/dataToken.js";
@@ -32,6 +35,8 @@ app.use(logoutRouter);
 app.use(adminUsersRouter);
 app.use(adminPermissionsRouter);
 app.use(adminSessionsRouter);
+app.use(adminAttributesRouter);
+app.use(adminRoleRulesRouter);
 app.use(backchannelLogoutRouter);
 app.use(deniedRouter);
 app.use(dataTokenRouter);
@@ -42,6 +47,7 @@ async function start() {
   // Postgres — seeding retries in the background so it doesn't hold up
   // the gateway from serving real login traffic in the meantime.
   void seedDevPermissions();
+  void seedDevAttributes();
   app.listen(config.port, () => {
     console.log(`auth-gateway listening on :${config.port}`);
   });

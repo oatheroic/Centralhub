@@ -62,4 +62,52 @@ export async function migrate(): Promise<void> {
       revoked_before TIMESTAMPTZ NOT NULL
     );
   `);
+  // Generic, CentralHub-wide corporate attributes — not tied to any one
+  // app. Required once set (enforced by the admin UI, not a DB constraint,
+  // so existing users without a row yet don't break anything). The single
+  // source of truth apps can build their own role-mapping rules against —
+  // see app_role_rules below.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_attributes (
+      user_sub   TEXT PRIMARY KEY,
+      department TEXT NOT NULL,
+      position   TEXT NOT NULL,
+      job_level  TEXT NOT NULL
+    );
+  `);
+  // Per-app rules translating the generic attributes above into that app's
+  // own vocabulary (e.g. apps/assets's role_code). A NULL criteria column
+  // is a wildcard — matches any value for that attribute. Resolution picks
+  // the most specific matching rule (most non-null criteria) — see
+  // attributes.ts's resolveRoleCode().
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS app_role_rules (
+      id         SERIAL PRIMARY KEY,
+      app_id     TEXT NOT NULL,
+      role_code  TEXT NOT NULL,
+      department TEXT,
+      position   TEXT,
+      job_level  TEXT
+    );
+  `);
+  // Added after the table's first release — a plain CREATE TABLE IF NOT
+  // EXISTS above wouldn't retrofit this onto an already-existing table
+  // (e.g. a volume from before this constraint existed), so it's applied
+  // separately, guarded by existence-check rather than a Postgres version
+  // of "ADD CONSTRAINT IF NOT EXISTS" (unique constraints don't support
+  // that clause). Lets seedDevAttributes() below use a plain ON CONFLICT
+  // DO NOTHING instead of a manual existence check per row.
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'app_role_rules_unique_criteria'
+      ) THEN
+        ALTER TABLE app_role_rules
+          ADD CONSTRAINT app_role_rules_unique_criteria
+          UNIQUE NULLS NOT DISTINCT (app_id, role_code, department, position, job_level);
+      END IF;
+    END
+    $$;
+  `);
 }

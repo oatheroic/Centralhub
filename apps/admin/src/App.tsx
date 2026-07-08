@@ -5,6 +5,7 @@ import {
   Button,
   ConfirmDialog,
   DataTable,
+  Input,
   Skeleton,
   ToastProvider,
   useToast,
@@ -17,6 +18,9 @@ type AdminUser = {
   email: string;
   roles: string[];
 };
+
+type UserAttributes = { department: string; position: string; jobLevel: string };
+const EMPTY_ATTRS: UserAttributes = { department: "", position: "", jobLevel: "" };
 
 type PermissionSet = { read: boolean; write: boolean; edit: boolean; delete: boolean };
 
@@ -151,6 +155,12 @@ function UsersPanel() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [ownId, setOwnId] = useState<string | null>(null);
   const [revokeTarget, setRevokeTarget] = useState<AdminUser | null>(null);
+  // Drafts, keyed by user id — edited locally as the admin types, saved on
+  // blur (not per-keystroke). Required fields (department/position/
+  // jobLevel), enforced client-side by refusing to save while any is
+  // blank — these feed apps/assets's (and any future app's) identity ->
+  // role_code mapping, see services/auth-gateway/src/attributes.ts.
+  const [attrDrafts, setAttrDrafts] = useState<Record<string, UserAttributes>>({});
   const toast = useToast();
 
   useEffect(() => {
@@ -169,7 +179,35 @@ function UsersPanel() {
     fetch("/auth/me", { credentials: "same-origin" })
       .then((res) => (res.ok ? (res.json() as Promise<{ sub: string }>) : null))
       .then((me) => setOwnId(me?.sub ?? null));
+
+    fetch("/auth/admin/users/attributes", { credentials: "same-origin" })
+      .then((res) => (res.ok ? (res.json() as Promise<Record<string, UserAttributes>>) : {}))
+      .then(setAttrDrafts);
   }, []);
+
+  function editAttr(userId: string, field: keyof UserAttributes, value: string) {
+    setAttrDrafts((prev) => ({ ...prev, [userId]: { ...(prev[userId] ?? EMPTY_ATTRS), [field]: value } }));
+  }
+
+  async function saveAttrs(userId: string) {
+    const draft = attrDrafts[userId] ?? EMPTY_ATTRS;
+    if (!draft.department.trim() || !draft.position.trim() || !draft.jobLevel.trim()) return;
+    try {
+      const res = await fetch(`/auth/admin/users/${userId}/attributes`, {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(draft),
+      });
+      if (!res.ok) throw new Error(`${res.status}`);
+    } catch (err) {
+      toast.show({
+        tone: "danger",
+        title: "Couldn't save attributes",
+        description: (err as Error).message,
+      });
+    }
+  }
 
   async function confirmRevoke() {
     if (!revokeTarget) return;
@@ -214,6 +252,45 @@ function UsersPanel() {
             </Badge>
           ))}
         </div>
+      ),
+    },
+    {
+      key: "department",
+      header: "Department",
+      render: (user) => (
+        <Input
+          value={attrDrafts[user.id]?.department ?? ""}
+          placeholder="Required"
+          className="h-8 w-28"
+          onChange={(e) => editAttr(user.id, "department", e.target.value)}
+          onBlur={() => saveAttrs(user.id)}
+        />
+      ),
+    },
+    {
+      key: "position",
+      header: "Position",
+      render: (user) => (
+        <Input
+          value={attrDrafts[user.id]?.position ?? ""}
+          placeholder="Required"
+          className="h-8 w-28"
+          onChange={(e) => editAttr(user.id, "position", e.target.value)}
+          onBlur={() => saveAttrs(user.id)}
+        />
+      ),
+    },
+    {
+      key: "jobLevel",
+      header: "Job level",
+      render: (user) => (
+        <Input
+          value={attrDrafts[user.id]?.jobLevel ?? ""}
+          placeholder="Required"
+          className="h-8 w-28"
+          onChange={(e) => editAttr(user.id, "jobLevel", e.target.value)}
+          onBlur={() => saveAttrs(user.id)}
+        />
       ),
     },
     {

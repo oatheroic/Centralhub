@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import AssetPurchaseForm from "@/components/AssetPurchaseForm";
 import ApproverPanel from "@/components/ApproverPanel";
 import AssetRegistrationPanel from "@/components/AssetRegistrationPanel";
@@ -10,13 +10,15 @@ import AssetTransferPanel from "@/components/AssetTransferPanel";
 import PasswordManagerPanel from "@/components/PasswordManagerPanel";
 import PersonReceivePasswordPanel from "@/components/PersonReceivePasswordPanel";
 import DepartmentFixPanel from "@/components/DepartmentFixPanel";
+import RoleRulesPanel from "@/components/RoleRulesPanel";
 import InternalReport from "@/components/InternalReport";
 import RoleSwitcher from "@/components/RoleSwitcher";
 import LoginForm from "@/components/LoginForm";
 import { AssetsNav } from "@/components/AssetsNav";
 import { Toaster } from "@/components/ui/sonner";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { useCurrentRoleInfo } from "@/lib/role";
+import { useCurrentRoleInfo, setCurrentRole, type RoleInfo } from "@/lib/role";
+import { supabase, getResolvedRoleCode } from "@/integrations/supabase/client";
 
 const ALL_STEPS = [
   { value: "step1", step: 1, label: "1️⃣ ผู้นำเสนอ", Comp: AssetPurchaseForm },
@@ -61,9 +63,59 @@ export default function App() {
       extras.push({ value: "admin", step: 99, label: "⚙️ จัดการผู้ใช้งาน", Comp: PasswordManagerPanel });
       extras.push({ value: "person_pw", step: 98, label: "🔐 รหัสรับทรัพย์สินรายบุคคล", Comp: PersonReceivePasswordPanel });
       extras.push({ value: "dept_fix", step: 97, label: "🏢 แก้ไขแผนกผู้รับผิดชอบ", Comp: DepartmentFixPanel });
+      extras.push({ value: "role_rules", step: 96, label: "🔗 กฎเชื่อมสิทธิ์", Comp: RoleRulesPanel });
     }
     return [...base, ...extras];
   }, [info]);
+
+  // Auto-login: if the CentralHub session resolves to a role_code (via
+  // department/position/job level matching one of this app's rules, see
+  // RoleRulesPanel), log straight into that role — skipping the manual
+  // picker below entirely. Runs on every mount regardless of whatever's
+  // already in localStorage (`info`) — a resolved role_code is tied to the
+  // current CentralHub identity and must win over a stale manual pick left
+  // over from a previous, possibly different, Keycloak login on this same
+  // browser (localStorage isn't cleared on Keycloak logout — see README
+  // §10). Only when nothing resolves does existing localStorage state (or
+  // the picker, if there's none) stay in effect.
+  const [autoLoginChecked, setAutoLoginChecked] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const roleCode = await getResolvedRoleCode();
+      if (cancelled) return;
+      if (!roleCode) {
+        setAutoLoginChecked(true);
+        return;
+      }
+      const { data } = await supabase
+        .from("role_assignments")
+        .select("role_code,display_name,step_access,is_admin")
+        .eq("role_code", roleCode)
+        .maybeSingle();
+      if (!cancelled) {
+        if (data) setCurrentRole(data.role_code, data as RoleInfo);
+        setAutoLoginChecked(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Deliberately run-once (mount only), not on every `info` change —
+    // setCurrentRole below dispatches a "role-changed" event that updates
+    // `info`, which would otherwise re-trigger this effect on its own
+    // write and loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (!autoLoginChecked) {
+    return (
+      <>
+        <AssetsNav />
+        <Toaster richColors position="top-right" />
+      </>
+    );
+  }
 
   if (!info) {
     return (

@@ -3,6 +3,7 @@ import { SignJWT } from "jose";
 import { config } from "../config.js";
 import { SESSION_COOKIE, verifySession } from "../session.js";
 import { getPermission } from "../permissions.js";
+import { resolveRoleCode } from "../attributes.js";
 import { isRevoked } from "../revocation.js";
 
 // Mints a short-lived JWT for a third-party app's self-hosted data layer
@@ -49,16 +50,26 @@ dataTokenRouter.get("/data-token", async (req, res) => {
       res.sendStatus(403);
       return;
     }
+    // Resolved from the caller's generic corporate attributes (department/
+    // position/job level) against this app's own rules — see attributes.ts.
+    // null if the user has no attributes set yet, or none of the app's
+    // rules match; the calling app falls back to its own login in that
+    // case (e.g. apps/assets's role-code picker), same as before this
+    // existed. Included in the JWT payload too (inert today — no RLS
+    // policy reads it yet) so a future app's own RLS can reference it
+    // without another round-trip through this endpoint.
+    const roleCode = await resolveRoleCode(claims.sub, appId);
     const jwt = await new SignJWT({
       role: `${appId}_authenticated`,
       sub: claims.sub,
       perm,
+      ...(roleCode ? { role_code: roleCode } : {}),
     })
       .setProtectedHeader({ alg: "HS256" })
       .setIssuedAt()
       .setExpirationTime("15m")
       .sign(dataJwtSecret);
-    res.json({ token: jwt });
+    res.json({ token: jwt, role_code: roleCode });
   } catch (err) {
     console.error("auth-gateway: data-token minting failed, failing closed", err);
     res.status(503).json({ error: "data token unavailable" });

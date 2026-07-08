@@ -13,12 +13,14 @@ const SUPABASE_URL = window.location.origin + "/apps/assets/api";
 const SUPABASE_PLACEHOLDER_KEY = "centralhub-self-hosted";
 
 let dataToken: string | null = null;
+let resolvedRoleCode: string | null = null;
 let dataTokenPromise: Promise<string | null> | null = null;
 
 async function fetchDataToken(): Promise<string | null> {
   const res = await fetch("/auth/data-token?app=assets", { credentials: "same-origin" });
   if (!res.ok) return null;
-  const body = (await res.json()) as { token: string };
+  const body = (await res.json()) as { token: string; role_code: string | null };
+  resolvedRoleCode = body.role_code;
   return body.token;
 }
 
@@ -31,6 +33,16 @@ async function getDataToken(): Promise<string | null> {
   if (!dataTokenPromise) dataTokenPromise = fetchDataToken();
   dataToken = await dataTokenPromise;
   return dataToken;
+}
+
+// The role_code resolved from the caller's CentralHub department/position/
+// job level against this app's rules (see RoleRulesPanel.tsx) — null if
+// none of the app's rules match, or the user's attributes aren't set yet.
+// Shares fetchDataToken's cached promise rather than firing a second
+// request, since both come back in the same /auth/data-token response.
+export async function getResolvedRoleCode(): Promise<string | null> {
+  await getDataToken();
+  return resolvedRoleCode;
 }
 
 function createSupabaseClient() {
