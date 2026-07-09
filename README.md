@@ -162,7 +162,24 @@ CentralHub/
     zero network request, and the auth gate never re-fires.
   - The login page uses a custom Keycloak theme (`keycloak/themes/centralhub/`)
     — CSS-only override via `theme.properties`, form structure/behavior
-    untouched.
+    untouched. Restyled to match `packages/ui/tokens.css`'s dark indigo/slate
+    palette: dark flat-gradient page background (overriding the base
+    "keycloak" theme's `keycloak-bg.png`, which is set via the higher-
+    specificity `.login-pf body` selector — a plain `body` rule loses
+    regardless of CSS load order), a light, layered-shadow card that scales
+    with viewport width (`clamp()`, no fixed breakpoint column), inline
+    field icons, and a "CentralHub" masthead (from `realm-export.json`'s
+    `displayName`) with a generated `::after` sub-header. Two gotchas worth
+    knowing before touching this file again: (1) the base theme wraps
+    `.card-pf` and a *second*, unrelated div (`#kc-content-wrapper`'s first
+    child) in a way that's easy to accidentally both select as "the card",
+    rendering a card nested inside a card — only `.card-pf` is the real
+    container; (2) field icons must live on a `::before` pseudo-element on
+    `.form-group` (via `:has()`), not as `background-image` on the `<input>`
+    itself — Chrome/Edge/Safari's autofill forcibly repaints an autofilled
+    input's own background, silently deleting any icon set there. Verified
+    with real headless-browser screenshots (desktop + mobile, plus a
+    simulated autofilled-background state), not just by reading the CSS.
 - **Deferred / not built**: MFA, password reset flows, self-service
   registration (`registrationAllowed: false`). Refresh-token rotation /
   silent renewal was considered and deliberately **not** built — see §8: once
@@ -763,38 +780,40 @@ pnpm stack:up
 For whoever (human or agent) picks this repo up next — what changed most
 recently, and where to look first.
 
-**What just happened**: a longer session, several consecutive pieces of
-work, each fully built, verified against the running Docker stack (rebuilt
-+ redeployed after every change, not just typechecked), and documented
-above:
-1. §8 — the background role re-sync poller (`roleSyncPoller.ts`), carried
-   over already-finished from before this session and committed here.
-2. §10/§13 — grouped every `apps/assets`-specific deferred item into its
-   own table in §13, and closed out the `cc_recipient` dropdown's missing
-   seed data (a one-migration fix, see §10's Status bullet).
-3. §9 — `apps/central-hub` gained a dismissible announcement banner,
-   department-grouped landing grid, and a "recently used" row.
-4. §10 — department/position/job_level (the identity→`role_code` mapping's
-   inputs) went from free-text to a managed, admin-extensible vocabulary:
-   new `attribute_values` table, new auth-gateway endpoints, and a new
-   `AttributeSelect` dropdown (with an "Add new" modal) in `apps/admin`.
-5. §9 — a shared `packages/ui` `Select` primitive (first one in the repo),
-   a responsive width pass (`AppShell`/`central-hub` no longer cap at a
-   fixed 1024px on every screen), and a dark-mode default with one
-   cross-app toggle (`packages/ui/theme.ts`, `ThemeToggle`), including a
-   React-free `@centralhub/ui/theme` subpath so `apps/assets` (React 19)
-   could share the exact same logic despite the peer-dep mismatch that
-   already keeps `AssetsNav.tsx` hand-authored.
+**What just happened**: a focused session restyling the Keycloak login page
+only — `keycloak/themes/centralhub/login/resources/css/centralhub.css`,
+CSS-only, no other file touched. Full account in §6's login-theme bullet;
+short version:
+1. Replaced the theme's original standalone pastel-pink/glassy look with
+   the same dark indigo/slate palette `packages/ui/tokens.css` uses
+   everywhere else, plus a responsive card width, field icons, a
+   "CentralHub" masthead + generated sub-header, and layered shadows for
+   depth against a flat dark gradient page background.
+2. Fixed two structural bugs introduced mid-session, both from
+   over-broad CSS selectors matching more of Keycloak's base-theme DOM
+   than intended: a card-nested-inside-a-card (two different elements both
+   getting "the card" styling) and a flex-row masthead sitting beside the
+   card instead of stacked above it.
+3. Fixed field icons disappearing under browser autofill: they were
+   `background-image` on the `<input>` itself, which Chrome/Edge/Safari's
+   autofill silently overwrites. Moved to a `::before` on the `.form-group`
+   wrapper (via `:has()`) instead — a plain div, never autofilled — and
+   added the standard `:-webkit-autofill` inset-`box-shadow` trick to
+   neutralize the blue/yellow autofill tint too.
 
-**Bugs found only by actually clicking through the app in a browser** (not
-by code review or `curl` — worth remembering for future work in this repo):
-`vite.config.ts` missing `base: "/apps/assets/"` (blank page), missing
-`GRANT USAGE ON SCHEMA storage` for two different Postgres role sets
-(uploads/bucket-metadata 500ing with a misleading "relation does not
-exist"), and the auto-login effect not overriding stale `localStorage`
-state from an earlier, different Keycloak session. All three are described
-in full, with root-cause detail, in §10 above — read it before touching
-`apps/assets` again, the same classes of bug are easy to reintroduce.
+**How this was actually verified**: no chromium-cli/Playwright was
+preinstalled for this repo, so a throwaway Playwright + headless Chromium
+was installed into the scratch temp dir (not `package.json` — nothing
+added to the repo's own dependencies) to screenshot the real rendered page
+end-to-end against the live `docker compose` stack (Keycloak's theme
+directory is bind-mounted read-only and served uncached under
+`start-dev`, so no container restart is needed between edits — confirmed
+by diffing the live-served CSS against the file on disk). Screenshots at
+desktop + mobile viewports, a simulated autofilled-background state, and
+computed-style/DOM inspection (`page.$eval`) is what actually caught the
+double-card and flex-row bugs above — they were invisible from reading the
+CSS alone, since every individual selector "looked" reasonable in
+isolation.
 
 **Local dev credentials** (all dev-only, seeded automatically on
 `docker compose up`, safe to commit): Keycloak login `dev-admin`/
@@ -803,30 +822,25 @@ own role-picker fallback login (only seen if the identity mapping doesn't
 resolve): `ADM01`/`123456` (full access), or `REQ01`/`APP01`/`AST01`/
 `PUR01`/`ACC01` with the same password for narrower roles.
 
-**Known-open items**, all cross-referenced from §13's `apps/assets`-specific
-table — read that table before starting new work here, it's kept current:
-`apps/assets`'s own role-picker login can't be fully retired (only made
-optional), and `storage-assets`'s bucket-metadata admin endpoint needs the
-service key. (The `cc_recipient` dropdown's missing seed data and the
-identity mapping's free-text department/position/job-level fields were both
-closed out this session — see §10.)
+**Known-open items** are unchanged from before this session — see §13's
+two tables (`apps/assets`-specific and general); nothing in this session
+closed or opened an item there.
 
 **One thing this session did differently — worth calling out for whoever's
-next**: every UI change was rebuilt into its actual Docker image
-(`docker compose build <service>` then `up -d <service>`) and re-verified
-against the running stack after each round, not just typechecked/built
-locally. Several rounds of user feedback only surfaced once the change was
-actually visible in the browser (icon position, font size, dropdown width)
-— typecheck-clean is necessary but wasn't sufficient on its own this
-session.
+next**: this was a CSS-only theme, so there was no image to rebuild —
+Keycloak's theme directory is bind-mounted (`environments/docker-compose.yml`)
+and served uncached under `start-dev`, so every edit was verified live
+against the running stack on the next request, no `docker compose build`/
+`restart` in the loop at all. Several rounds of user feedback (icon
+invisible under autofill, double-card layout, masthead floating beside
+instead of above the card) only surfaced from actual rendered screenshots,
+not from re-reading the CSS — the same "verify visually, not just
+typecheck-clean" lesson prior sessions in this log already learned for
+app UI work, now confirmed to apply to the Keycloak theme too.
 
-**Git/environment state as of this handoff**: everything above is committed
-(not squashed — read `git log` for the real sequence). Given the volume and
-interleaving of changes this session — many features touched the same
-files (`AppShell.tsx`, `central-hub/App.tsx`, `README.md`) across several
-rounds of follow-up user feedback — commits are grouped by feature rather
-than strictly one-code-commit-then-one-doc-commit-per-change the way
-earlier sessions in this log did; each commit message says what it covers.
+**Git/environment state as of this handoff**: the CSS change described
+above is uncommitted as of this note being written — commit it alongside
+this README update in one commit (see the commit this paragraph ships in).
 `environments/.env` is gitignored and deleted at the end of each session
 per this repo's own convention (see §3/§5) — regenerate it from
 `.env.example` following §14's Quickstart before bringing the stack back

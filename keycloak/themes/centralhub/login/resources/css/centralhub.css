@@ -1,10 +1,22 @@
 /*
- * CentralHub login theme — pastel pink, Apple Human Interface Guidelines as
- * reference (system font stack, generous whitespace, soft blur/glass
- * surfaces, pill-shaped buttons, subtle motion). No external CSS framework
- * or CDN — this is layered on top of Keycloak's own base "keycloak" theme
- * CSS via theme.properties, so it's pure override, nothing to download,
- * nothing that can break form functionality (structure/JS untouched).
+ * CentralHub login theme — dark page background, light contrasting sign-in
+ * panel that visibly floats above it via layered shadows. Colors are
+ * variants of the same indigo/slate palette the rest of the product uses
+ * (packages/ui/tokens.css), not a fresh color study. This is layered on top
+ * of Keycloak's own base "keycloak" theme CSS via theme.properties, so it's
+ * pure override, nothing to download, nothing that can break form
+ * functionality (structure/JS untouched).
+ *
+ * "CentralHub" as the panel title comes from the realm's own displayName
+ * (keycloak/realm-export.json) rendered into #kc-header-wrapper by
+ * Keycloak's template — not injected here. The sub-header line is added via
+ * ::after generated content on that same element (still CSS-only, no
+ * template edit) since Keycloak's own #kc-page-title text varies per page
+ * (login/register/error) and isn't a fixed subtitle slot.
+ *
+ * Field icons are inline SVG data URIs set as input background-image — the
+ * only way to add per-field iconography without touching Keycloak's
+ * generated form markup.
  *
  * Selectors below combine Keycloak's classic ("keycloak" parent theme)
  * class/id names with generic input[type=...] fallbacks, so styling stays
@@ -12,65 +24,109 @@
  */
 
 :root {
-  --ch-bg-1: #ffe9f0;
-  --ch-bg-2: #ffd3e4;
-  --ch-bg-3: #ffc2da;
-  --ch-card-bg: rgba(255, 255, 255, 0.72);
-  --ch-card-border: rgba(255, 255, 255, 0.6);
-  --ch-text: #3a2530;
-  --ch-text-muted: #8a6b78;
-  --ch-accent: #ff6f9c;
-  --ch-accent-dark: #f0578a;
-  --ch-input-bg: rgba(255, 255, 255, 0.85);
-  --ch-input-border: rgba(58, 37, 48, 0.12);
-  --ch-radius-card: 24px;
-  --ch-radius-field: 14px;
-  --ch-radius-pill: 980px;
-  --ch-font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
-    "Helvetica Neue", Helvetica, Arial, sans-serif;
+  /* Page background stays dark. */
+  --ch-bg: #020617; /* slate-950 */
+  --ch-bg-2: #0b1220; /* slightly lifted slate, used in the page's own gradient only */
+
+  /* Sign-in panel is a light, contrasting surface — not a variant of the
+     page background — so it visibly separates from it instead of reading
+     as one continuous dark field. */
+  --ch-panel-bg: #f8fafc; /* slate-50 */
+  --ch-panel-border: #e2e8f0; /* slate-200 */
+  --ch-text: #0f172a; /* slate-900 — text ON the light card */
+  --ch-text-muted: #64748b; /* slate-500 — muted text ON the light card */
+  --ch-icon: #475569; /* slate-600 — darkened for visibility against the white input (slate-400 read as nearly invisible) */
+
+  /* Text that sits directly on the dark page background (the masthead
+     above the card), not on the light card surface — needs the opposite
+     contrast direction from --ch-text/--ch-text-muted above. */
+  --ch-onbg-text: #f8fafc; /* slate-50 */
+  --ch-onbg-text-muted: #94a3b8; /* slate-400 */
+
+  --ch-input-bg: #ffffff;
+  --ch-input-border: #cbd5e1; /* slate-300 */
+
+  --ch-accent: #4f46e5; /* indigo-600 — enough contrast on a light panel */
+  --ch-accent-hover: #4338ca; /* indigo-700 */
+  --ch-accent-fg: #ffffff;
+
+  --ch-danger: #b91c1c; /* red-700 — legible on the light panel */
+  --ch-danger-bg: #fee2e2; /* red-100 */
+  --ch-danger-border: #fecaca; /* red-200 */
+
+  --ch-radius-card: 20px;
+  --ch-radius-field: 10px;
+  --ch-radius-pill: 8px;
+  --ch-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+    Helvetica, Arial, sans-serif;
+
+  --ch-ease: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* Card width scales up on larger viewports instead of capping at a fixed
+     400px — clamp(min, preferred, max) so it grows with the viewport
+     between roughly tablet and desktop widths, then stops. */
+  --ch-card-width: clamp(360px, 30vw + 260px, 520px);
 }
 
+/* The base "keycloak" theme sets its low-poly background image on
+   ".login-pf body" (login.css) — a 2-element descendant selector beats a
+   plain "body" selector on specificity regardless of CSS load order, so
+   the override has to match that same selector to actually win. Replaced
+   with a flat, minimal dark gradient in the same slate family as
+   packages/ui/tokens.css's --chub-bg (central-hub's own landing page is a
+   flat single slate-950 background; this adds only a barely-there gradient
+   for depth, not a busy image). */
 html,
-body {
+body,
+.login-pf body {
   min-height: 100vh;
   font-family: var(--ch-font);
   color: var(--ch-text);
-  background: radial-gradient(circle at 20% 15%, var(--ch-bg-1) 0%, transparent 45%),
-    radial-gradient(circle at 85% 80%, var(--ch-bg-3) 0%, transparent 50%),
-    linear-gradient(160deg, var(--ch-bg-1) 0%, var(--ch-bg-2) 55%, var(--ch-bg-3) 100%);
+  background: linear-gradient(160deg, #020617 0%, #0a0f1e 100%);
   background-attachment: fixed;
 }
 
 /* Main card surface — classic theme wraps content in .login-pf-page / .card-pf
    depending on template; #kc-content-wrapper is the most stable anchor. */
-.login-pf-page,
-#kc-content-wrapper {
+/* .login-pf-page is Keycloak's outermost flex container; #kc-header (the
+   CentralHub masthead) and .card-pf (the sign-in panel) are direct flex
+   children of it. The base theme leaves this a flex ROW (masthead beside
+   the card) — stack them vertically and centered instead, like a
+   conventional login page. */
+.login-pf-page {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   min-height: 100vh;
-  padding: 24px;
+  padding: 24px 16px;
+  gap: 28px;
+  box-sizing: border-box;
 }
 
-.card-pf,
-#kc-content-wrapper > div,
-.login-pf-page .container {
-  background: var(--ch-card-bg);
-  backdrop-filter: blur(24px) saturate(160%);
-  -webkit-backdrop-filter: blur(24px) saturate(160%);
-  border: 1px solid var(--ch-card-border);
+/* Only .card-pf is the real card container. #kc-content-wrapper's own
+   first child (#kc-form) is NOT a separate card — it was previously also
+   matched here by mistake, which rendered as a card nested inside a card. */
+.card-pf {
+  background: var(--ch-panel-bg);
+  border: 1px solid var(--ch-panel-border);
   border-radius: var(--ch-radius-card);
-  box-shadow: 0 20px 60px rgba(240, 87, 138, 0.18), 0 2px 8px rgba(58, 37, 48, 0.06);
+  /* Layered shadow stack: a tight contact shadow, a mid-range lift, and a
+     wide ambient glow tinted indigo — reads as real elevation above the
+     dark page rather than a single flat drop-shadow. */
+  box-shadow: 0 1px 1px rgba(2, 6, 23, 0.9), 0 12px 24px -8px rgba(2, 6, 23, 0.55),
+    0 32px 64px -16px rgba(2, 6, 23, 0.65), 0 0 80px -20px rgba(99, 102, 241, 0.35);
   padding: 40px 36px;
-  max-width: 400px;
-  width: 100%;
-  animation: ch-rise 0.45s cubic-bezier(0.16, 1, 0.3, 1);
+  width: var(--ch-card-width);
+  max-width: 100%;
+  box-sizing: border-box;
+  animation: ch-rise 0.4s var(--ch-ease);
 }
 
 @keyframes ch-rise {
   from {
     opacity: 0;
-    transform: translateY(12px);
+    transform: translateY(10px);
   }
   to {
     opacity: 1;
@@ -78,31 +134,47 @@ body {
   }
 }
 
-/* Header / realm title */
+/* Masthead — "CentralHub" (from realm-export.json's displayName) + the
+   generated sub-header below. This block sits OUTSIDE the card, directly
+   on the dark page background, so it uses the --ch-onbg-* (light) text
+   colors, not --ch-text (reserved for text on the light card surface). */
 #kc-header,
-#kc-page-title,
 .login-pf-page-header {
   text-align: center;
-  color: var(--ch-text);
-  font-weight: 600;
-  letter-spacing: -0.02em;
 }
 
 #kc-header-wrapper {
-  color: var(--ch-text);
-  font-size: 1.375rem;
-  font-weight: 600;
+  color: var(--ch-onbg-text);
+  font-size: 1.875rem;
+  font-weight: 700;
   letter-spacing: -0.02em;
   text-align: center;
   display: block;
-  margin-bottom: 8px;
 }
 
-#kc-page-title {
-  font-size: 1.125rem;
+/* Sub-header placeholder line under the "CentralHub" title — generated
+   content so it doesn't require a Keycloak template change. Update the
+   string here if the placeholder copy should change. */
+#kc-header-wrapper::after {
+  content: "Sign in to access your workspace";
+  display: block;
+  margin-top: 8px;
+  font-size: 0.9375rem;
   font-weight: 500;
-  color: var(--ch-text-muted);
-  margin-bottom: 24px;
+  letter-spacing: 0;
+  color: var(--ch-onbg-text-muted);
+}
+
+/* Keycloak's own per-page heading ("Sign in to your account" / "Register" /
+   etc.) renders INSIDE the card, above the form — kept as a secondary,
+   in-card heading beneath the CentralHub masthead above it. */
+#kc-page-title {
+  text-align: center;
+  font-size: 1.0625rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ch-text);
+  margin: 0 0 24px;
 }
 
 /* Labels */
@@ -115,6 +187,16 @@ label,
   display: inline-block;
 }
 
+/* Fields grouped with consistent vertical rhythm. position:relative anchors
+   the field icon pseudo-elements below — the icon lives on this wrapper,
+   not on the <input> itself, specifically so browser autofill (which
+   forcibly repaints the input's own background, blowing away any
+   background-image set directly on it) can never hide it. */
+.form-group {
+  position: relative;
+  margin-bottom: 16px;
+}
+
 /* Inputs */
 input[type="text"],
 input[type="password"],
@@ -123,14 +205,123 @@ input[type="search"],
 .form-control {
   width: 100%;
   box-sizing: border-box;
-  background: var(--ch-input-bg);
+  background-color: var(--ch-input-bg);
   border: 1.5px solid var(--ch-input-border);
   border-radius: var(--ch-radius-field);
-  padding: 12px 16px;
-  font-size: 0.9375rem;
+  padding: 12px 14px 12px 38px;
+  min-height: 44px;
+  font-size: 16px; /* prevents iOS Safari auto-zoom on focus */
   font-family: var(--ch-font);
   color: var(--ch-text);
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color 0.15s var(--ch-ease), box-shadow 0.15s var(--ch-ease);
+}
+
+/* Field icons — rendered as a ::before on .form-group (a plain div, never
+   autofilled) rather than as background-image on the input, so they stay
+   visible even when Chrome/Edge paints its own autofill background over
+   the input. bottom:13px lines up because the input (or, for password,
+   its .pf-c-input-group wrapper) is the last child and exactly 44px tall,
+   flush with .form-group's own bottom edge — (44px - 18px icon) / 2 = 13px. */
+.form-group:has(> input[type="text"])::before,
+.form-group:has(> input[name="username"])::before,
+.form-group:has(> input[type="email"])::before {
+  content: "";
+  position: absolute;
+  left: 12px;
+  bottom: 13px;
+  width: 18px;
+  height: 18px;
+  pointer-events: none;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23475569' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='8' r='3.5'/%3E%3Cpath d='M4.5 20c1.4-3.6 4.4-5.5 7.5-5.5s6.1 1.9 7.5 5.5'/%3E%3C/svg%3E")
+    no-repeat center / contain;
+}
+
+.form-group:has(> input[type="password"])::before,
+.form-group:has(> .pf-c-input-group)::before {
+  content: "";
+  position: absolute;
+  left: 12px;
+  bottom: 13px;
+  width: 18px;
+  height: 18px;
+  pointer-events: none;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23475569' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='5' y='11' width='14' height='9' rx='2'/%3E%3Cpath d='M8 11V7.5a4 4 0 0 1 8 0V11'/%3E%3C/svg%3E")
+    no-repeat center / contain;
+}
+
+/* Fields without a matched icon (e.g. TOTP/OTP code) shouldn't reserve the
+   icon gutter. */
+input[type="search"],
+.form-control:not([type="text"]):not([type="password"]):not([type="email"]) {
+  padding-left: 14px;
+}
+
+input[type="text"]::placeholder,
+input[type="password"]::placeholder,
+input[type="email"]::placeholder {
+  color: #94a3b8; /* slate-400 */
+}
+
+/* Chrome/Edge/Safari paint autofilled fields with their own forced blue or
+   yellow background, ignoring the input's authored background-color — the
+   inset box-shadow trick is the standard workaround (painting a solid
+   color "over" that internal layer). Safe to do now that the field icon
+   lives on .form-group's ::before (painted in a later, higher stacking
+   layer than the input), not on the input's own background. The very long
+   transition-delay stops Chrome's internal autofill transition from
+   re-asserting its own color after a few seconds. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active {
+  -webkit-text-fill-color: var(--ch-text);
+  -webkit-box-shadow: 0 0 0 1000px var(--ch-input-bg) inset;
+  box-shadow: 0 0 0 1000px var(--ch-input-bg) inset;
+  caret-color: var(--ch-text);
+  transition: background-color 9999s ease-in-out 0s, color 9999s ease-in-out 0s;
+}
+
+/* Password field + its "show/hide" toggle button share a flex row
+   (Keycloak wraps them in .pf-c-input-group). Give the button its own
+   spacing and a borderless control that only reveals itself on
+   hover/focus, instead of the base theme's flush default. */
+.pf-c-input-group {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.pf-c-input-group input[type="password"] {
+  width: auto;
+  flex: 1 1 auto;
+}
+
+.pf-c-input-group .pf-c-button.pf-m-control,
+button[data-password-toggle] {
+  flex: 0 0 auto;
+  width: 44px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--ch-radius-field);
+  color: var(--ch-text-muted);
+  cursor: pointer;
+  transition: background-color 0.15s var(--ch-ease), color 0.15s var(--ch-ease);
+}
+
+.pf-c-input-group .pf-c-button.pf-m-control:hover,
+button[data-password-toggle]:hover {
+  background: var(--ch-panel-border);
+  color: var(--ch-accent);
+}
+
+.pf-c-input-group .pf-c-button.pf-m-control:focus-visible,
+button[data-password-toggle]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.25);
 }
 
 input[type="text"]:focus,
@@ -139,10 +330,10 @@ input[type="email"]:focus,
 .form-control:focus {
   outline: none;
   border-color: var(--ch-accent);
-  box-shadow: 0 0 0 4px rgba(255, 111, 156, 0.15);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
 }
 
-/* Buttons — Apple-style pill shape */
+/* Buttons */
 input[type="submit"],
 button[type="submit"],
 .btn-primary,
@@ -150,23 +341,26 @@ button[type="submit"],
   width: 100%;
   border: none;
   border-radius: var(--ch-radius-pill);
-  padding: 13px 20px;
+  padding: 12px 20px;
+  min-height: 44px;
   font-size: 0.9375rem;
   font-weight: 600;
   font-family: var(--ch-font);
-  color: #fff;
-  background: linear-gradient(135deg, var(--ch-accent) 0%, var(--ch-accent-dark) 100%);
-  box-shadow: 0 8px 20px rgba(240, 87, 138, 0.35);
+  color: var(--ch-accent-fg);
+  background: var(--ch-accent);
   cursor: pointer;
-  transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
+  box-shadow: 0 8px 16px -4px rgba(79, 70, 229, 0.45);
+  transition: background-color 0.15s var(--ch-ease), transform 0.1s var(--ch-ease),
+    box-shadow 0.15s var(--ch-ease);
+  margin-top: 4px;
 }
 
 input[type="submit"]:hover,
 button[type="submit"]:hover,
 .btn-primary:hover,
 #kc-login:hover {
-  filter: brightness(1.05);
-  box-shadow: 0 10px 24px rgba(240, 87, 138, 0.45);
+  background: var(--ch-accent-hover);
+  box-shadow: 0 10px 20px -4px rgba(79, 70, 229, 0.55);
 }
 
 input[type="submit"]:active,
@@ -174,17 +368,34 @@ button[type="submit"]:active,
 .btn-primary:active,
 #kc-login:active {
   transform: scale(0.98);
+  box-shadow: 0 4px 10px -2px rgba(79, 70, 229, 0.45);
+}
+
+input[type="submit"]:focus-visible,
+button[type="submit"]:focus-visible,
+.btn-primary:focus-visible,
+#kc-login:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.35);
 }
 
 /* Links */
 a {
-  color: var(--ch-accent-dark);
+  color: var(--ch-accent);
   text-decoration: none;
   font-weight: 500;
+  transition: color 0.15s var(--ch-ease);
+  border-radius: 4px;
 }
 
 a:hover {
+  color: var(--ch-accent-hover);
   text-decoration: underline;
+}
+
+a:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.3);
 }
 
 /* Checkbox row ("remember me") */
@@ -199,13 +410,14 @@ a:hover {
 .alert-error,
 .kc-feedback-text,
 #input-error {
-  background: rgba(240, 87, 138, 0.1);
-  border: 1px solid rgba(240, 87, 138, 0.25);
+  background: var(--ch-danger-bg);
+  border: 1px solid var(--ch-danger-border);
   border-radius: var(--ch-radius-field);
-  color: var(--ch-accent-dark);
+  color: var(--ch-danger);
   padding: 10px 14px;
   font-size: 0.8125rem;
   font-weight: 500;
+  margin-bottom: 16px;
 }
 
 /* Footer / info links under the card */
@@ -213,7 +425,7 @@ a:hover {
 #kc-registration,
 .form-options {
   text-align: center;
-  margin-top: 16px;
+  margin-top: 20px;
   font-size: 0.8125rem;
   color: var(--ch-text-muted);
 }
@@ -225,4 +437,33 @@ a:hover {
   text-indent: 0;
   width: auto;
   height: auto;
+}
+
+/* Small phones: tighter card padding and slightly smaller headings so the
+   card doesn't feel cramped or overflow the viewport. */
+@media (max-width: 480px) {
+  .card-pf {
+    padding: 28px 22px;
+    border-radius: 16px;
+  }
+
+  #kc-header-wrapper {
+    font-size: 1.5rem;
+  }
+
+  #kc-page-title {
+    font-size: 1rem;
+    margin-bottom: 22px;
+  }
+}
+
+/* Respect users who've asked for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  .card-pf {
+    animation: none;
+  }
+
+  * {
+    transition-duration: 0.01ms !important;
+  }
 }
