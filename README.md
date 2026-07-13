@@ -265,6 +265,63 @@ CentralHub/
     panel edits one (user, app) cell at a time.
   - No audit log of who changed which permission when.
 
+### Choosing an enforcement model: native gate vs. minted-JWT/RLS
+
+Two enforcement models coexist in this repo. They are **not** competing
+standards — both resolve the *same* policy store (`getPermission()` over
+`app_permissions`, plus the same `isRevoked` check). They differ only in
+*where* the decision is enforced, chosen by trust level and granularity:
+
+- **Native gate** (`GET /session/verify-permission`, this section): auth-gateway
+  answers a per-action `200`/`401`/`403` that the app's own backend (or its
+  Nginx location) calls. Enforcement is a call the app *chooses to make* — so
+  it trusts the app's code to make it. Strong where it matters for first-party
+  code: **instant revocation** (live DB check every request), app-level
+  granularity (4 flags), and the signing secret never leaves auth-gateway.
+- **Minted-JWT / RLS** (`GET /auth/data-token`, §10): auth-gateway mints a
+  short-lived (15m) JWT carrying the actual permission claims; an external data
+  layer (PostgREST / storage-api / Postgres RLS) verifies it and enforces
+  **below** the app. Enforcement survives a buggy or hostile app layer, reaches
+  **row/field** granularity, and keeps auth-gateway off the per-query hot path —
+  at the cost of a bounded (≤15m) revocation lag and sharing `PGRST_JWT_SECRET`
+  with those services.
+
+Neither is a strict upgrade: native wins on revocation timeliness and secret
+containment; RLS wins on app-layer defense, granularity, and hot-path scaling.
+
+**Pick by answering, in order:**
+1. **Is the app's data/service layer code you don't fully trust** (third-party
+   export, unaudited)? → **minted-JWT/RLS**, so enforcement lives below the
+   app. (This is exactly why `apps/assets` uses it — see §10's `USING (true)`
+   finding.)
+2. **Do you need per-record / per-field rules** ("edit only your own records")?
+   → **minted-JWT/RLS**; the native gate is app-level only.
+3. **Is it chatty and data-heavy**, where a gateway round-trip per query would
+   hurt? → **minted-JWT/RLS** (one amortized token) — but weigh the ≤15m
+   revocation lag.
+4. **Otherwise** (first-party code, app-level 4-flag gating, want instant
+   revocation): → **native gate**.
+
+**Implementing the native gate** for a new first-party backend: the endpoint
+already exists and is the single source of truth (read-only against
+`app_permissions`, no auth-gateway change needed). Forward the `chub_session`
+cookie to `GET /session/verify-permission?app=<id>&verb=<read|write|edit|delete>`
+before the mutation and treat non-`200` as denied — either via an `auth_request`
+in the app's own Nginx location (mirror `/session/verify`) or a direct
+server-to-server call over the Docker network. **Never** trust the client-side
+`useGuardedAction()` hook as the gate; it is a UX affordance only.
+
+**Implementing minted-JWT/RLS** for another self-hosted app: follow §10 — give
+the app its own Postgres, put a JWT-verifying layer (PostgREST or equivalent) in
+front, add an `<app>_authenticated` role, mint per-request tokens via
+`/auth/data-token` (extend its payload if the app needs claims beyond
+`perm`/`role_code`), and write real RLS policies against those claims. Share
+`PGRST_JWT_SECRET` only with that app's own data services.
+
+A first-party app may still choose minted-JWT/RLS if it genuinely needs
+row-level security — the dividing line is **trust level + granularity, not
+first- vs. third-party by fiat**.
+
 ---
 
 ## 8. Pillar 4c — Instant session/role revocation
@@ -490,6 +547,10 @@ CentralHub/
   policy in its 28 migrations was `USING (true)`/`WITH CHECK (true)` — enabled
   but enforcing nothing; the (public, bundle-embedded) anon key alone could
   read/write/delete any row.
+- **Why this app uses minted-JWT/RLS and not the native `/session/verify-permission`
+  gate**: see §7's "Choosing an enforcement model" — short version, this is
+  untrusted third-party code needing row-level enforcement, so the check lives
+  below the app in Postgres RLS rather than in a call the app must remember to make.
 - **Architecture — self-host the Supabase-shaped API, not a rewrite**:
   `@supabase/supabase-js`'s Postgres client is a REST client against
   **PostgREST**; its Storage client is a client against Supabase's own
