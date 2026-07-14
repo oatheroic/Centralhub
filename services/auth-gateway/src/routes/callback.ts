@@ -30,7 +30,7 @@ callbackRouter.get("/callback", async (req, res) => {
     // request afterward — the JWT below deliberately does NOT carry roles;
     // it's identity-only (sub/name/email), never the authorization source
     // of truth. See README "Pillar 4c".
-    await syncRolesFromKeycloak(sub, roles);
+    await syncRolesFromKeycloak(sub, roles, "login");
     const token = await signSession({ sub, name, email });
     res.cookie(SESSION_COOKIE, token, {
       httpOnly: true,

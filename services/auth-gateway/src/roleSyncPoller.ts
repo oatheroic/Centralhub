@@ -22,7 +22,7 @@ export function startRoleSyncPoller(intervalMs = Number(process.env.ROLE_SYNC_IN
     try {
       const users = await listUsers();
       for (const user of users) {
-        await syncRolesFromKeycloak(user.id, user.roles);
+        await syncRolesFromKeycloak(user.id, user.roles, "role-sync-poller");
       }
     } catch (err) {
       // Keycloak being briefly unreachable (restart, network blip) must not

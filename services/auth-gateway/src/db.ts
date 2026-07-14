@@ -146,4 +146,27 @@ export async function migrate(): Promise<void> {
       ('job_level', 'Junior')
     ON CONFLICT (kind, value) DO NOTHING;
   `);
+  // Append-only history of admin-initiated (and system role-sync) changes —
+  // see audit.ts. actor_sub is NULL for system-driven rows (login/poller
+  // role sync has no admin actor); target_name/app_id are denormalized at
+  // write time from whatever the caller already had loaded, rather than
+  // re-resolved from Keycloak later, so history reflects what was true
+  // then, not what's true now. No retention/prune job yet — not needed at
+  // this scale.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id          BIGSERIAL PRIMARY KEY,
+      at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+      actor_sub   TEXT,
+      actor_name  TEXT NOT NULL,
+      action      TEXT NOT NULL,
+      target_sub  TEXT,
+      target_name TEXT,
+      app_id      TEXT,
+      detail      JSONB NOT NULL DEFAULT '{}'::jsonb
+    );
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS audit_log_at_idx ON audit_log (at DESC);
+  `);
 }

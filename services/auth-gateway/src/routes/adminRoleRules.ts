@@ -1,7 +1,8 @@
 import { Router, type Response } from "express";
-import { requireSession, requireAdmin } from "../middleware/requireAdmin.js";
+import { requireSession, requireAdmin, type AuthedRequest } from "../middleware/requireAdmin.js";
 import { listAppRoleRules, createAppRoleRule, deleteAppRoleRule } from "../attributes.js";
 import { KNOWN_APPS } from "../permissions.js";
+import { recordAudit } from "../audit.js";
 
 // Generic per-app CRUD, not assets-specific — apps/assets's own admin panel
 // calls this with :appId="assets", but any future app with the same
@@ -35,7 +36,7 @@ adminRoleRulesRouter.post(
   "/admin/apps/:appId/role-rules",
   requireSession,
   requireAdmin,
-  async (req, res) => {
+  async (req: AuthedRequest, res) => {
     const appId = req.params.appId as string;
     if (!checkKnownApp(appId, res)) return;
     const { roleCode, department, position, jobLevel } = req.body as Partial<{
@@ -54,6 +55,12 @@ adminRoleRulesRouter.post(
         position: position?.trim() || null,
         jobLevel: jobLevel?.trim() || null,
       });
+      void recordAudit({
+        actor: { sub: req.session?.sub ?? null, name: req.session?.name ?? "unknown" },
+        action: "role_rule.create",
+        appId,
+        detail: rule,
+      });
       res.status(201).json(rule);
     } catch (err) {
       console.error("auth-gateway: role rule creation failed", err);
@@ -66,7 +73,7 @@ adminRoleRulesRouter.delete(
   "/admin/apps/:appId/role-rules/:id",
   requireSession,
   requireAdmin,
-  async (req, res) => {
+  async (req: AuthedRequest, res) => {
     const appId = req.params.appId as string;
     if (!checkKnownApp(appId, res)) return;
     const id = Number(req.params.id);
@@ -75,7 +82,17 @@ adminRoleRulesRouter.delete(
       return;
     }
     try {
+      // Fetched before deleting so the audit row carries the deleted rule's
+      // own criteria, not just its id — mirrors the before/after pattern
+      // used for permission and attribute edits.
+      const rule = (await listAppRoleRules(appId)).find((r) => r.id === id) ?? null;
       await deleteAppRoleRule(appId, id);
+      void recordAudit({
+        actor: { sub: req.session?.sub ?? null, name: req.session?.name ?? "unknown" },
+        action: "role_rule.delete",
+        appId,
+        detail: rule ?? { id },
+      });
       res.sendStatus(204);
     } catch (err) {
       console.error("auth-gateway: role rule deletion failed", err);

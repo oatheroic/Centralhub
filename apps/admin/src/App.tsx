@@ -68,11 +68,12 @@ function PermissionsPanel() {
     });
 
     try {
+      const userName = matrix.users.find((u) => u.id === userId)?.name;
       const res = await fetch(`/auth/admin/permissions/${userId}/${appId}`, {
         method: "PUT",
         credentials: "same-origin",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(next),
+        body: JSON.stringify({ ...next, userName }),
       });
       if (!res.ok) throw new Error(`${res.status}`);
     } catch (err) {
@@ -206,11 +207,12 @@ function UsersPanel() {
   async function saveAttrs(userId: string, draft: UserAttributes) {
     if (!draft.department.trim() || !draft.position.trim() || !draft.jobLevel.trim()) return;
     try {
+      const userName = users?.find((u) => u.id === userId)?.name;
       const res = await fetch(`/auth/admin/users/${userId}/attributes`, {
         method: "PUT",
         credentials: "same-origin",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(draft),
+        body: JSON.stringify({ ...draft, userName }),
       });
       if (!res.ok) throw new Error(`${res.status}`);
     } catch (err) {
@@ -259,6 +261,8 @@ function UsersPanel() {
       const res = await fetch(`/auth/admin/sessions/${id}/revoke`, {
         method: "PUT",
         credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
       });
       if (!res.ok) throw new Error(`${res.status}`);
       toast.show({ tone: "success", title: `Session revoked for ${name}` });
@@ -385,7 +389,145 @@ function UsersPanel() {
   );
 }
 
-type Tab = "users" | "permissions";
+type AuditRow = {
+  id: number;
+  at: string;
+  actorSub: string | null;
+  actorName: string;
+  action: string;
+  targetSub: string | null;
+  targetName: string | null;
+  appId: string | null;
+  detail: unknown;
+};
+
+// Detail's shape depends on `action` (see auth-gateway's audit.ts) — this
+// only ever renders rows this same admin panel (or the auth-gateway routes
+// it drives) has itself produced, so a per-action switch covering exactly
+// those shapes is safe; unrecognized actions still fall back to raw JSON
+// rather than throwing.
+function summarizeAuditDetail(row: AuditRow): string {
+  const detail = (row.detail ?? {}) as Record<string, any>;
+  switch (row.action) {
+    case "permission.update": {
+      const verbs: (keyof PermissionSet)[] = ["read", "write", "edit", "delete"];
+      const changes = verbs
+        .filter((v) => detail.before?.[v] !== detail.after?.[v])
+        .map((v) => `${v}: ${detail.before?.[v] ? "✓" : "✗"} → ${detail.after?.[v] ? "✓" : "✗"}`);
+      return changes.length > 0 ? changes.join(", ") : "no change";
+    }
+    case "session.revoke":
+      return "Session revoked";
+    case "role.sync": {
+      const added = (detail.added ?? []) as string[];
+      const removed = (detail.removed ?? []) as string[];
+      const parts = [...added.map((r) => `+${r}`), ...removed.map((r) => `-${r}`)];
+      return parts.join(", ") || "no change";
+    }
+    case "attribute.update": {
+      const fields = ["department", "position", "jobLevel"] as const;
+      const changes = fields
+        .filter((f) => detail.before?.[f] !== detail.after?.[f])
+        .map((f) => `${f}: ${detail.before?.[f] ?? "(none)"} → ${detail.after?.[f]}`);
+      return changes.length > 0 ? changes.join(", ") : "no change";
+    }
+    case "role_rule.create":
+      return `Rule added: ${detail.roleCode ?? ""}`;
+    case "role_rule.delete":
+      return `Rule removed: ${detail.roleCode ?? `(id ${detail.id ?? "?"})`}`;
+    default:
+      return JSON.stringify(detail);
+  }
+}
+
+const ACTION_LABELS: Record<string, string> = {
+  "permission.update": "Permission",
+  "session.revoke": "Session revoke",
+  "role.sync": "Role sync",
+  "attribute.update": "Attribute",
+  "role_rule.create": "Role rule added",
+  "role_rule.delete": "Role rule removed",
+};
+
+function AuditPanel() {
+  const [rows, setRows] = useState<AuditRow[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/auth/admin/audit?limit=200", { credentials: "same-origin" })
+      .then((res) => {
+        if (!res.ok) throw new Error(`${res.status}`);
+        return res.json() as Promise<AuditRow[]>;
+      })
+      .then(setRows)
+      .catch((err) => setLoadError((err as Error).message));
+  }, []);
+
+  const columns: DataTableColumn<AuditRow>[] = [
+    {
+      key: "at",
+      header: "Time",
+      render: (row) => <span className="whitespace-nowrap">{new Date(row.at).toLocaleString()}</span>,
+      sortValue: (row) => row.at,
+    },
+    {
+      key: "actor",
+      header: "Actor",
+      render: (row) => row.actorName,
+      sortValue: (row) => row.actorName.toLowerCase(),
+    },
+    {
+      key: "action",
+      header: "Action",
+      render: (row) => <Badge tone={row.action === "session.revoke" ? "danger" : "neutral"}>{ACTION_LABELS[row.action] ?? row.action}</Badge>,
+      sortValue: (row) => row.action,
+    },
+    {
+      key: "target",
+      header: "Target",
+      render: (row) => row.targetName ?? row.targetSub ?? "—",
+      sortValue: (row) => (row.targetName ?? row.targetSub ?? "").toLowerCase(),
+    },
+    {
+      key: "app",
+      header: "App",
+      render: (row) => row.appId ?? "—",
+    },
+    {
+      key: "detail",
+      header: "Detail",
+      render: (row) => <span className="text-text-muted">{summarizeAuditDetail(row)}</span>,
+    },
+  ];
+
+  return (
+    <section className="space-y-4">
+      <header>
+        <h2 className="text-xl font-semibold text-text">Audit log</h2>
+        <p className="text-text-muted">
+          Most recent 200 admin-initiated permission, session, attribute, and role changes.
+        </p>
+      </header>
+
+      {loadError && <p className="text-sm text-danger">Failed to load audit log: {loadError}</p>}
+
+      {!loadError && (
+        <DataTable
+          columns={columns}
+          rows={rows ?? []}
+          getRowId={(row) => String(row.id)}
+          searchFields={(row) => [row.actorName, row.targetName ?? "", row.appId ?? "", row.action]}
+          searchPlaceholder="Search by actor, target, app, or action..."
+          loading={rows === null}
+          emptyTitle="No audit history yet"
+          emptyDescription="Permission, session, attribute, and role changes will show up here."
+        />
+      )}
+    </section>
+  );
+}
+
+type Tab = "users" | "permissions" | "audit";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("users");
@@ -405,11 +547,14 @@ export default function App() {
             >
               Permissions
             </Button>
+            <Button variant={tab === "audit" ? "primary" : "secondary"} onClick={() => setTab("audit")}>
+              Audit
+            </Button>
           </nav>
         }
       >
         <div className="space-y-10">
-          {tab === "users" ? <UsersPanel /> : <PermissionsPanel />}
+          {tab === "users" ? <UsersPanel /> : tab === "permissions" ? <PermissionsPanel /> : <AuditPanel />}
         </div>
       </AppShell>
     </ToastProvider>

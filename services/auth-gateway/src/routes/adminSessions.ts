@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { requireSession, requireAdmin, type AuthedRequest } from "../middleware/requireAdmin.js";
 import { revokeUser } from "../revocation.js";
+import { recordAudit } from "../audit.js";
 
 export const adminSessionsRouter = Router();
 
@@ -21,8 +22,16 @@ adminSessionsRouter.put(
       res.status(400).json({ error: "cannot revoke your own session" });
       return;
     }
+    // name is audit-only, same denormalization rationale as adminPermissions.ts.
+    const { name } = req.body as Partial<{ name: string }>;
     try {
       await revokeUser(userSub);
+      void recordAudit({
+        actor: { sub: req.session?.sub ?? null, name: req.session?.name ?? "unknown" },
+        action: "session.revoke",
+        targetSub: userSub,
+        targetName: name ?? null,
+      });
       res.sendStatus(204);
     } catch (err) {
       console.error("auth-gateway: session revoke failed", err);

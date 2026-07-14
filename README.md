@@ -261,9 +261,18 @@ CentralHub/
     has no caller today (see above), only the pattern is in place.
   - No per-field/per-record permissions (e.g. "edit only your own records") —
     this is app-level granularity only, four flags per (user, app).
-  - No bulk-grant UI (e.g. "grant all Marketing users read") — the admin
-    panel edits one (user, app) cell at a time.
-  - No audit log of who changed which permission when.
+- **Audit log** (`services/auth-gateway/src/audit.ts`, `audit_log` table):
+  append-only history of every permission/attribute/role-rule edit, session
+  revoke, and realm-role sync (login- and poller-driven), each with an actor
+  (`null` sub for system-driven role syncs), a before/after or added/removed
+  `detail` JSON blob, and a denormalized target/app name captured at write
+  time — not re-resolved from Keycloak later, so history reflects what was
+  true then. Fail-soft: a write failure here logs and continues rather than
+  blocking or rolling back the real mutation it's describing. Surfaced
+  read-only in `apps/admin`'s new "Audit" tab (latest 200 rows, searchable/
+  sortable via the shared `DataTable`). No retention/prune job yet, and role
+  syncs only log when the role set actually changes (so the 60s poller
+  doesn't write a no-op row every tick).
 
 ### Choosing an enforcement model: native gate vs. minted-JWT/RLS
 
@@ -752,8 +761,7 @@ else.
 | Real mutating backend per app | each `apps/<name>` | No app has real data to mutate yet — demo actions are local state only |
 | Server-side enforcement of write/edit/delete | app-specific backend, calling `/session/verify-permission` | Nothing to enforce until an app has a real endpoint |
 | Per-record / field-level permissions | `app_permissions` table design | Current granularity is per (user, app) only |
-| Bulk permission grants | `apps/admin` Permissions panel | One-cell-at-a-time editing was sufficient for the current user count |
-| Audit log of permission/role changes | new table + admin UI | Not needed until multiple admins manage grants |
+| Bulk permission grants | `apps/admin` Permissions panel | One-cell-at-a-time editing was sufficient for the current user count — in progress, see §7 |
 | Per-session (`jti`) tracking / "your active sessions" UI | `session_revocations` table design | Current granularity is per-user (kill all sessions), not per-device — see §8 |
 | Production-safe credentials | `keycloak/realm-export.json`, `.env` | `dev-admin`/`dev-user`/client secret are dev-only seed data — see §6, §7 |
 | `usePermissions.ts`'s `window.alert()` → toast | `apps/_template`, `apps/marketing`, `apps/finance` | Duplicated across 3 files by design (§9); a real fix needs extracting the hook into `packages/ui` first, out of scope for §9's UI-primitives pass |
