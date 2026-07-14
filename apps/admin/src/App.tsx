@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AppShell,
   Badge,
   Button,
   ConfirmDialog,
   DataTable,
+  Select,
   Skeleton,
   ToastProvider,
   useToast,
@@ -44,6 +45,11 @@ const VERBS: (keyof PermissionSet)[] = ["read", "write", "edit", "delete"];
 function PermissionsPanel() {
   const [matrix, setMatrix] = useState<PermissionMatrix | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // App is a filter, not a column — this is what keeps the panel's layout
+  // O(1) in the number of apps instead of growing 4 checkbox columns wider
+  // per app (the old matrix layout, which overflowed horizontally past a
+  // handful of apps). Defaulted once the matrix loads, in the effect below.
+  const [selectedApp, setSelectedApp] = useState<string | null>(null);
   const toast = useToast();
 
   useEffect(() => {
@@ -52,7 +58,10 @@ function PermissionsPanel() {
         if (!res.ok) throw new Error(`${res.status}`);
         return res.json() as Promise<PermissionMatrix>;
       })
-      .then(setMatrix)
+      .then((data) => {
+        setMatrix(data);
+        setSelectedApp((prev) => prev ?? data.apps[0] ?? null);
+      })
       .catch((err) => setLoadError((err as Error).message));
   }, []);
 
@@ -90,12 +99,40 @@ function PermissionsPanel() {
     }
   }
 
+  const columns = useMemo<DataTableColumn<PermissionMatrix["users"][number]>[]>(() => {
+    if (!matrix || !selectedApp) return [];
+    return [
+      {
+        key: "user",
+        header: "User",
+        render: (user) => (
+          <div>
+            <div className="text-text">{user.name}</div>
+            <div className="text-text-muted">{user.email}</div>
+          </div>
+        ),
+        sortValue: (user) => user.name.toLowerCase(),
+      },
+      ...VERBS.map((verb) => ({
+        key: verb,
+        header: verb,
+        render: (user: PermissionMatrix["users"][number]) => (
+          <input
+            type="checkbox"
+            checked={matrix.permissions[user.id][selectedApp][verb]}
+            onChange={() => toggle(user.id, selectedApp, verb)}
+          />
+        ),
+      })),
+    ];
+  }, [matrix, selectedApp]);
+
   return (
     <section className="space-y-4">
       <header>
         <h2 className="text-xl font-semibold text-text">Permissions</h2>
         <p className="text-text-muted">
-          Per-user, per-app read/write/edit/delete grants. Toggling a checkbox saves immediately.
+          Pick an app, then grant read/write/edit/delete per user. Toggling a checkbox saves immediately.
         </p>
       </header>
 
@@ -111,49 +148,29 @@ function PermissionsPanel() {
         </div>
       )}
 
-      {matrix && (
-        <div className="overflow-x-auto rounded-lg border border-border">
-          <table className="w-full text-left text-sm">
-            <thead className="text-text-muted">
-              <tr>
-                <th className="border-b border-border px-4 py-2 font-medium">User</th>
-                {matrix.apps.map((appId) => (
-                  <th key={appId} className="border-b border-border px-4 py-2 font-medium">
-                    {appId}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {matrix.users.map((user) => (
-                <tr key={user.id}>
-                  <td className="px-4 py-3 align-top">
-                    <div className="text-text">{user.name}</div>
-                    <div className="text-text-muted">{user.email}</div>
-                  </td>
-                  {matrix.apps.map((appId) => {
-                    const permission = matrix.permissions[user.id][appId];
-                    return (
-                      <td key={appId} className="px-4 py-3 align-top">
-                        <div className="flex flex-col gap-1">
-                          {VERBS.map((verb) => (
-                            <label key={verb} className="flex items-center gap-2 text-text-muted">
-                              <input
-                                type="checkbox"
-                                checked={permission[verb]}
-                                onChange={() => toggle(user.id, appId, verb)}
-                              />
-                              {verb}
-                            </label>
-                          ))}
-                        </div>
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {matrix && selectedApp && (
+        <div className="space-y-4">
+          <Select
+            value={selectedApp}
+            onChange={(e) => setSelectedApp(e.target.value)}
+            className="h-9 w-56"
+          >
+            {matrix.apps.map((appId) => (
+              <option key={appId} value={appId}>
+                {appId}
+              </option>
+            ))}
+          </Select>
+
+          <DataTable
+            columns={columns}
+            rows={matrix.users}
+            getRowId={(user) => user.id}
+            searchFields={(user) => [user.name, user.email]}
+            searchPlaceholder="Search by name or email..."
+            emptyTitle="No users found"
+            emptyDescription="No users match your search."
+          />
         </div>
       )}
     </section>

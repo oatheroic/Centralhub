@@ -462,15 +462,19 @@ first- vs. third-party by fiat**.
   from-scratch Docker build — each consuming app's `Dockerfile` needs one
   added `COPY packages/ui ./packages/ui` line.
 - **Admin panel**: `apps/admin` adopts the foundation — an `AppShell` with
-  Users/Permissions tabs, the users table replaced by a searchable/sortable/
-  paginated `DataTable`, a `ConfirmDialog` gating session revoke (the
+  Users/Permissions/Audit tabs, the users table replaced by a searchable/
+  sortable/paginated `DataTable`, a `ConfirmDialog` gating session revoke (the
   higher-stakes, harder-to-undo action — permission-checkbox toggles stay
   instant/optimistic, unchanged, see §7), and toast notifications replacing
   `window.alert()`/inline error text for both revoke and permission-toggle
   feedback. Also added: a role-gated "Admin" card on `central-hub`'s landing
   grid (`requiresRole` on `AppRegistryEntry`), visible only to users with the
   `admin` role — a discoverability fix only; the real access gate stays
-  enforced server-side by Nginx either way.
+  enforced server-side by Nginx either way. The Permissions panel itself was
+  later rebuilt from a hand-rolled matrix (one column per app, four stacked
+  checkboxes per cell) into an app-centric master/detail `DataTable` — an app
+  `Select` acts as a filter, not a column, so the layout stays flat as
+  `KNOWN_APPS` grows instead of getting wider per app — see §7.
 - **Landing page + department apps**: `apps/central-hub`, `apps/marketing`,
   and `apps/finance` all adopt the foundation, finishing the rollout to every
   app in the repo. Central-hub's grid gains a live search box and
