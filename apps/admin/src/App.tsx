@@ -50,6 +50,11 @@ function PermissionsPanel() {
   // per app (the old matrix layout, which overflowed horizontally past a
   // handful of apps). Defaulted once the matrix loads, in the effect below.
   const [selectedApp, setSelectedApp] = useState<string | null>(null);
+  // Selection is scoped to the current app — switching apps clears it (see
+  // the Select's onChange below), since "these users, this app" is the
+  // whole point of a bulk grant.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkVerb, setBulkVerb] = useState<keyof PermissionSet>("read");
   const toast = useToast();
 
   useEffect(() => {
@@ -99,9 +104,83 @@ function PermissionsPanel() {
     }
   }
 
+  function toggleOne(userId: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(userId)) next.delete(userId);
+      else next.add(userId);
+      return next;
+    });
+  }
+
+  // Selects/clears every currently loaded user for the app, not just the
+  // DataTable's current search/sort/page slice — the table doesn't expose
+  // which rows are actually visible, and "select all" for a bulk grant is
+  // the common case anyway (e.g. "grant every Marketing user read").
+  function toggleAll() {
+    if (!matrix) return;
+    setSelectedIds((prev) => (prev.size === matrix.users.length ? new Set() : new Set(matrix.users.map((u) => u.id))));
+  }
+
+  async function bulkApply(verb: keyof PermissionSet, value: boolean) {
+    if (!matrix || !selectedApp || selectedIds.size === 0) return;
+    const ids = Array.from(selectedIds);
+    const before: Record<string, PermissionSet> = {};
+    for (const id of ids) before[id] = matrix.permissions[id][selectedApp];
+
+    // Optimistic update across every selected row, same rollback-on-failure
+    // shape as the single-cell toggle above.
+    setMatrix((prev) => {
+      if (!prev) return prev;
+      const permissions = { ...prev.permissions };
+      for (const id of ids) {
+        permissions[id] = { ...permissions[id], [selectedApp]: { ...permissions[id][selectedApp], [verb]: value } };
+      }
+      return { ...prev, permissions };
+    });
+
+    try {
+      const res = await fetch("/auth/admin/permissions/bulk", {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ userSubs: ids, appId: selectedApp, patch: { [verb]: value } }),
+      });
+      if (!res.ok) throw new Error(`${res.status}`);
+      toast.show({ tone: "success", title: `${value ? "Granted" : "Revoked"} ${verb} for ${ids.length} user(s)` });
+    } catch (err) {
+      setMatrix((prev) => {
+        if (!prev) return prev;
+        const permissions = { ...prev.permissions };
+        for (const id of ids) {
+          permissions[id] = { ...permissions[id], [selectedApp]: before[id] };
+        }
+        return { ...prev, permissions };
+      });
+      toast.show({
+        tone: "danger",
+        title: "Couldn't apply bulk change",
+        description: (err as Error).message,
+      });
+    }
+  }
+
   const columns = useMemo<DataTableColumn<PermissionMatrix["users"][number]>[]>(() => {
     if (!matrix || !selectedApp) return [];
     return [
+      {
+        key: "select",
+        header: (
+          <input
+            type="checkbox"
+            checked={selectedIds.size > 0 && selectedIds.size === matrix.users.length}
+            onChange={toggleAll}
+          />
+        ),
+        render: (user) => (
+          <input type="checkbox" checked={selectedIds.has(user.id)} onChange={() => toggleOne(user.id)} />
+        ),
+      },
       {
         key: "user",
         header: "User",
@@ -125,7 +204,7 @@ function PermissionsPanel() {
         ),
       })),
     ];
-  }, [matrix, selectedApp]);
+  }, [matrix, selectedApp, selectedIds]);
 
   return (
     <section className="space-y-4">
@@ -152,7 +231,10 @@ function PermissionsPanel() {
         <div className="space-y-4">
           <Select
             value={selectedApp}
-            onChange={(e) => setSelectedApp(e.target.value)}
+            onChange={(e) => {
+              setSelectedApp(e.target.value);
+              setSelectedIds(new Set());
+            }}
             className="h-9 w-56"
           >
             {matrix.apps.map((appId) => (
@@ -161,6 +243,29 @@ function PermissionsPanel() {
               </option>
             ))}
           </Select>
+
+          {selectedIds.size > 0 && (
+            <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 text-sm">
+              <span className="text-text-muted">{selectedIds.size} selected</span>
+              <Select
+                value={bulkVerb}
+                onChange={(e) => setBulkVerb(e.target.value as keyof PermissionSet)}
+                className="h-8 w-28"
+              >
+                {VERBS.map((verb) => (
+                  <option key={verb} value={verb}>
+                    {verb}
+                  </option>
+                ))}
+              </Select>
+              <Button variant="secondary" onClick={() => bulkApply(bulkVerb, true)}>
+                Grant
+              </Button>
+              <Button variant="danger" onClick={() => bulkApply(bulkVerb, false)}>
+                Revoke
+              </Button>
+            </div>
+          )}
 
           <DataTable
             columns={columns}
@@ -433,6 +538,10 @@ function summarizeAuditDetail(row: AuditRow): string {
         .map((v) => `${v}: ${detail.before?.[v] ? "✓" : "✗"} → ${detail.after?.[v] ? "✓" : "✗"}`);
       return changes.length > 0 ? changes.join(", ") : "no change";
     }
+    case "permission.bulk_update": {
+      const [verb, value] = Object.entries(detail.patch ?? {})[0] ?? [];
+      return `${value ? "Granted" : "Revoked"} ${verb} for ${detail.count ?? detail.userSubs?.length ?? "?"} user(s)`;
+    }
     case "session.revoke":
       return "Session revoked";
     case "role.sync": {
@@ -459,6 +568,7 @@ function summarizeAuditDetail(row: AuditRow): string {
 
 const ACTION_LABELS: Record<string, string> = {
   "permission.update": "Permission",
+  "permission.bulk_update": "Permission (bulk)",
   "session.revoke": "Session revoke",
   "role.sync": "Role sync",
   "attribute.update": "Attribute",

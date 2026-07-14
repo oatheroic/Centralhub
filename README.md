@@ -273,6 +273,19 @@ CentralHub/
   sortable via the shared `DataTable`). No retention/prune job yet, and role
   syncs only log when the role set actually changes (so the 60s poller
   doesn't write a no-op row every tick).
+- **Bulk permission grants**: the Permissions panel's master/detail
+  `DataTable` (see §9) gained row multi-select — a header checkbox selects
+  every currently loaded user for the selected app — plus an action bar
+  (verb picker + Grant/Revoke) that PUTs `/admin/permissions/bulk`
+  (`{ userSubs, appId, patch }`) to `bulkUpsertPermission()` in
+  `permissions.ts`, applying one verb's value to every selected user inside
+  a single transaction (all-or-nothing). One audit row per bulk action
+  (`permission.bulk_update`, `{ userSubs, patch, count }`) rather than one
+  per user — the point is recording the batch's scope, not duplicating the
+  single-cell route's per-user detail. "Select all" selects every loaded
+  user for that app, not just the table's current search/sort/page slice,
+  since the `DataTable` doesn't expose which rows are actually visible and
+  "grant everyone" is the common bulk case anyway.
 
 ### Choosing an enforcement model: native gate vs. minted-JWT/RLS
 
@@ -765,7 +778,6 @@ else.
 | Real mutating backend per app | each `apps/<name>` | No app has real data to mutate yet — demo actions are local state only |
 | Server-side enforcement of write/edit/delete | app-specific backend, calling `/session/verify-permission` | Nothing to enforce until an app has a real endpoint |
 | Per-record / field-level permissions | `app_permissions` table design | Current granularity is per (user, app) only |
-| Bulk permission grants | `apps/admin` Permissions panel | One-cell-at-a-time editing was sufficient for the current user count — in progress, see §7 |
 | Per-session (`jti`) tracking / "your active sessions" UI | `session_revocations` table design | Current granularity is per-user (kill all sessions), not per-device — see §8 |
 | Production-safe credentials | `keycloak/realm-export.json`, `.env` | `dev-admin`/`dev-user`/client secret are dev-only seed data — see §6, §7 |
 | `usePermissions.ts`'s `window.alert()` → toast | `apps/_template`, `apps/marketing`, `apps/finance` | Duplicated across 3 files by design (§9); a real fix needs extracting the hook into `packages/ui` first, out of scope for §9's UI-primitives pass |

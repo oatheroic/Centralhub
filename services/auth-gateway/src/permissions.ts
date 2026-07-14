@@ -89,6 +89,40 @@ export async function upsertPermission(
   );
 }
 
+// One transaction for the whole batch — either every listed user gets the
+// patch applied or none do, so a failure partway through never leaves a
+// bulk grant half-applied. Reads each user's current row via the shared
+// pool (outside the transaction) before writing through the transaction's
+// own client — safe here because nothing else concurrently writes
+// app_permissions for these rows during an admin-driven bulk action.
+export async function bulkUpsertPermission(
+  userSubs: string[],
+  appId: string,
+  patch: Partial<PermissionSet>,
+): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    for (const userSub of userSubs) {
+      const current = await getPermission(userSub, appId);
+      const next = { ...current, ...patch };
+      await client.query(
+        `INSERT INTO app_permissions (user_sub, app_id, can_read, can_write, can_edit, can_delete)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (user_sub, app_id)
+         DO UPDATE SET can_read = $3, can_write = $4, can_edit = $5, can_delete = $6`,
+        [userSub, appId, next.read, next.write, next.edit, next.delete],
+      );
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 async function seedRow(username: string, appId: string, grant: Partial<PermissionSet>): Promise<void> {
   const sub = await findUserSubByUsername(username);
   if (!sub) {

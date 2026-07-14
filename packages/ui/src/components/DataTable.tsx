@@ -7,7 +7,7 @@ import { EmptyState } from "./EmptyState";
 
 export type DataTableColumn<T> = {
   key: string;
-  header: string;
+  header: ReactNode;
   render: (row: T) => ReactNode;
   sortValue?: (row: T) => string | number;
 };

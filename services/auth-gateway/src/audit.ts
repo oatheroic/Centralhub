@@ -9,6 +9,7 @@ import { pool } from "./db.js";
 
 export type AuditAction =
   | "permission.update"
+  | "permission.bulk_update"
   | "session.revoke"
   | "role.sync"
   | "attribute.update"
