@@ -3,7 +3,7 @@ import { SignJWT } from "jose";
 import { config } from "../config.js";
 import { SESSION_COOKIE, verifySession } from "../session.js";
 import { getPermission } from "../permissions.js";
-import { resolveRoleCode } from "../attributes.js";
+import { resolveRoleCode, getUserAttributes } from "../attributes.js";
 import { isRevoked } from "../revocation.js";
 
 // Mints a short-lived JWT for a third-party app's self-hosted data layer
@@ -51,25 +51,38 @@ dataTokenRouter.get("/data-token", async (req, res) => {
       return;
     }
     // Resolved from the caller's generic corporate attributes (department/
-    // position/job level) against this app's own rules — see attributes.ts.
-    // null if the user has no attributes set yet, or none of the app's
-    // rules match; the calling app falls back to its own login in that
-    // case (e.g. apps/assets's role-code picker), same as before this
-    // existed. Included in the JWT payload too (inert today — no RLS
-    // policy reads it yet) so a future app's own RLS can reference it
-    // without another round-trip through this endpoint.
+    // position/job level) against this app's own rules, or a per-user
+    // override — see attributes.ts's resolveRoleCode(). null if neither
+    // resolves anything; the calling app falls back to its own login in
+    // that case (e.g. apps/assets's role-code picker), same as before this
+    // existed. Included in the JWT payload too (inert for apps whose RLS
+    // doesn't read it, like assets) so a future app's own RLS can
+    // reference it without another round-trip through this endpoint —
+    // apps/engineering's rewritten has_role()/is_engineering_user() do.
     const roleCode = await resolveRoleCode(claims.sub, appId);
+    // The caller's raw department attribute string, passed through
+    // unresolved — apps/engineering's own department_aliases table (inside
+    // its own self-hosted DB) does the string -> that app's departments.id
+    // translation, not this service. Harmless extra claim for apps that
+    // don't read it.
+    const attrs = await getUserAttributes(claims.sub);
     const jwt = await new SignJWT({
       role: `${appId}_authenticated`,
       sub: claims.sub,
       perm,
+      // The CentralHub session's own display name — lets a self-hosted
+      // app provision a real full_name (e.g. apps/engineering's
+      // ensure_profile()) instead of falling back to a code/uid fragment.
+      // Harmless extra claim for apps that don't read it.
+      name: claims.name,
       ...(roleCode ? { role_code: roleCode } : {}),
+      ...(attrs?.department ? { dept_name: attrs.department } : {}),
     })
       .setProtectedHeader({ alg: "HS256" })
       .setIssuedAt()
       .setExpirationTime("15m")
       .sign(dataJwtSecret);
-    res.json({ token: jwt, role_code: roleCode });
+    res.json({ token: jwt, role_code: roleCode, dept_name: attrs?.department ?? null });
   } catch (err) {
     console.error("auth-gateway: data-token minting failed, failing closed", err);
     res.status(503).json({ error: "data token unavailable" });

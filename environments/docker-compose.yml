@@ -8,6 +8,8 @@ volumes:
   pgdata: {}
   assets_pgdata: {}
   assets_storage: {}
+  engineering_pgdata: {}
+  engineering_storage: {}
 
 services:
   gateway:
@@ -25,6 +27,7 @@ services:
       - app-finance
       - app-admin
       - app-assets
+      - app-engineering
     networks:
       - centralhub
 
@@ -256,6 +259,106 @@ services:
     depends_on:
       - postgrest-assets
       - storage-assets
+    networks:
+      - centralhub
+
+  # --- Engineering app's own database: a sibling to `db`/`assets-db`, not a
+  # schema inside either — every third-party app gets its own dedicated
+  # Postgres. Never shares credentials with `db` (Keycloak) or `assets-db`.
+  engineering-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: engineering
+      POSTGRES_USER: engineering
+      POSTGRES_PASSWORD: ${ENGINEERING_DB_PASSWORD}
+    volumes:
+      - engineering_pgdata:/var/lib/postgresql/data
+      - ../apps/engineering/scripts/init-roles.sql:/docker-entrypoint-initdb.d/00-roles.sql:ro
+    networks:
+      - centralhub
+
+  # --- PostgREST: auto-generated REST API in front of engineering-db,
+  # replacing the hosted Supabase project this export was built against.
+  # Verifies the bearer JWT itself (PGRST_JWT_SECRET, shared with
+  # auth-gateway's /auth/data-token minter) and exposes its claims to
+  # Postgres as request.jwt.claims, which the rewritten RLS policies
+  # (apps/engineering/supabase/migrations/..._centralhub_rls.sql) check for
+  # real role/department-scoped access — replacing this export's own real
+  # (but Supabase-Auth-backed) RLS with the same logic, now resolved
+  # against CentralHub identity instead.
+  postgrest-engineering:
+    image: postgrest/postgrest:v12.2.3
+    environment:
+      PGRST_DB_URI: postgres://engineering:${ENGINEERING_DB_PASSWORD}@engineering-db:5432/engineering
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: engineering_anon
+      PGRST_JWT_SECRET: ${PGRST_JWT_SECRET}
+      PGRST_JWT_ROLE_CLAIM_KEY: .role
+    depends_on:
+      - engineering-db
+    networks:
+      - centralhub
+
+  # --- Storage API: self-hosted replacement for Supabase Storage, backing
+  # the app's "repair-images" bucket. File-system backend (a Docker
+  # volume), not S3. Keeps supabase.storage.from(...) client calls in the
+  # app working unmodified; only client.ts's URL/key config changes.
+  storage-engineering:
+    image: supabase/storage-api:v1.11.13
+    environment:
+      ANON_KEY: ${ENGINEERING_STORAGE_ANON_KEY}
+      SERVICE_KEY: ${ENGINEERING_STORAGE_SERVICE_KEY}
+      PGRST_JWT_SECRET: ${PGRST_JWT_SECRET}
+      DATABASE_URL: postgres://engineering:${ENGINEERING_DB_PASSWORD}@engineering-db:5432/engineering
+      DB_INSTALL_ROLES: "false"
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: engineering
+      REGION: local
+      GLOBAL_S3_BUCKET: unused
+      FILE_SIZE_LIMIT: "52428800"
+      ENABLE_IMAGE_TRANSFORMATION: "false"
+    volumes:
+      - engineering_storage:/var/lib/storage
+    depends_on:
+      - engineering-db
+    networks:
+      - centralhub
+
+  # --- One-shot migrator for engineering-db: applies the exported
+  # migrations (with their storage.* statements stripped) and then, after
+  # waiting for storage-engineering to finish its own schema bootstrap,
+  # applies the CentralHub RLS-rewrite migration, which is also where the
+  # storage bucket + its real policies get created. Mirrors assets-migrate
+  # exactly.
+  engineering-migrate:
+    build:
+      context: ..
+      dockerfile: apps/engineering/scripts/Dockerfile
+    environment:
+      PGHOST: engineering-db
+      PGUSER: engineering
+      PGPASSWORD: ${ENGINEERING_DB_PASSWORD}
+      PGDATABASE: engineering
+      STORAGE_HEALTH_URL: http://storage-engineering:5000/status
+    depends_on:
+      - engineering-db
+      - storage-engineering
+    networks:
+      - centralhub
+
+  # --- App: engineering (second third-party/Lovable-exported app) -----------
+  # Talks to postgrest-engineering/storage-engineering, not the gateway's
+  # app_permissions flow directly — gated by the same generic
+  # /apps/engineering/ Nginx block as every app, plus a dedicated
+  # /apps/engineering/api/ location for its data calls.
+  app-engineering:
+    build:
+      context: ..
+      dockerfile: apps/engineering/Dockerfile
+    depends_on:
+      - postgrest-engineering
+      - storage-engineering
     networks:
       - centralhub
 

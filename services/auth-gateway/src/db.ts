@@ -110,6 +110,25 @@ export async function migrate(): Promise<void> {
     END
     $$;
   `);
+  // Per-app, per-user exception on top of app_role_rules above — pins one
+  // named CentralHub user directly to a role_code, bypassing attribute-rule
+  // matching entirely for that user. Added for apps/engineering's ingestion
+  // (the general case is "grant every Staff/Junior user the repairer role
+  // via a rule", but a named individual sometimes needs a one-off
+  // exception) — generic, not engineering-specific, so any future app can
+  // reuse it the same way it reuses app_role_rules. Resolution order is
+  // override -> rule -> none; see resolveRoleCode() in attributes.ts. Never
+  // touches user_attributes — CentralHub's own attribute shape/admin UI is
+  // completely unaffected by this table's existence.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS app_role_overrides (
+      id         SERIAL PRIMARY KEY,
+      app_id     TEXT NOT NULL,
+      user_sub   TEXT NOT NULL,
+      role_code  TEXT NOT NULL,
+      UNIQUE (app_id, user_sub)
+    );
+  `);
   // Managed vocabulary for user_attributes' three columns — replaces free
   // text with a per-kind list an admin can pick from (apps/admin's
   // AttributeSelect) or extend (see the POST route in

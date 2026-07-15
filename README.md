@@ -34,11 +34,17 @@ CentralHub/
 │   ├── finance/                # Department app
 │   ├── admin/                   # User list + user × app permissions matrix editor,
 │   │                             # gated by the admin realm role
-│   └── assets/                  # First third-party app (§10) — Lovable export, now a
-│                                  # static SPA with its own self-hosted Postgres/
-│                                  # PostgREST/storage-api (assets-db, postgrest-assets,
-│                                  # storage-assets in docker-compose.yml), not a shared
-│                                  # database or a cloud dependency
+│   ├── assets/                  # First third-party app (§10) — Lovable export, now a
+│   │                             # static SPA with its own self-hosted Postgres/
+│   │                             # PostgREST/storage-api (assets-db, postgrest-assets,
+│   │                             # storage-assets in docker-compose.yml), not a shared
+│   │                             # database or a cloud dependency
+│   └── engineering/              # Second third-party app (§10b) — Lovable export with
+│                                  # real Supabase Auth + real RLS (unlike assets' USING
+│                                  # (true) gap), now CentralHub-gated the same way, with
+│                                  # its own self-hosted Postgres/PostgREST/storage-api
+│                                  # (engineering-db, postgrest-engineering,
+│                                  # storage-engineering)
 ├── packages/
 │   └── ui/                    # Shared design tokens, Tailwind preset, and React
 │                                # primitives (§9) — consumed via workspace:*
@@ -726,6 +732,424 @@ first- vs. third-party by fiat**.
 
 ---
 
+## 10b. Second third-party app ingestion (`apps/engineering`)
+
+- **Objective**: same as §10 — onboard an externally-built app onto our own
+  infrastructure, no ongoing SaaS dependency — for an export that arrived
+  meaningfully harder than `apps/assets`.
+- **What came in**: `apps/engineering` ("BigOne"/`bgone`) is a Thai-language
+  machine repair-job workflow — a reporter (ผู้แจ้ง) files a repair job on a
+  machine, a leader (หัวหน้าสังกัด) assigns a repairer (ผู้ซ่อม), who works it
+  through statuses (`in_progress → waiting_parts → external → awaiting_review`)
+  to `completed`; plus parts requisitions, a job-history log, and a
+  `repair-images` storage bucket. TanStack Start (SSR) on React 19/Tailwind v4,
+  **real Supabase Auth** (code → synthetic `@bigone.local` email/derived
+  password, `supabase.auth.signInWithPassword`), and — unlike `apps/assets`,
+  where every RLS policy was `USING (true)` — **real RLS**: every policy keyed
+  on `auth.uid()`/`has_role()`/`current_dept()`, reading this app's own
+  `user_roles`/`profiles`. Also had server functions with real logic: admin
+  user CRUD, single-session-per-user enforcement (heartbeat + force-logout),
+  and a Google Sheets sync via `connector-gateway.lovable.dev` (an external
+  Lovable SaaS dependency, not just hosted Supabase).
+- **What was dropped, and why**:
+  - **Google Sheets sync** — dropped entirely (not re-homed to a direct
+    Google API either). Kept it would mean retaining exactly the kind of
+    ongoing third-party SaaS dependency this ingestion pattern exists to
+    remove. Tracked in §13.
+  - **Single-session enforcement** (`active_session_id`/heartbeat) —
+    retired; CentralHub's own instant session revocation (§8) already
+    solves the same problem app-wide, so a second, app-local mechanism
+    would be redundant. Its columns (`profiles.active_session_id`/
+    `active_session_seen_at`) don't exist in this app's schema at all —
+    see below on why the schema was rewritten fresh rather than patched.
+  - **The app's own admin user CRUD / code-based login** — CentralHub is the
+    only login (same principle as every other app); a user's engineering
+    profile is now provisioned automatically (see below), not created by an
+    admin inside the app.
+- **Architecture — same minted-JWT/RLS recipe as `apps/assets`, but the
+  migrations are written fresh, not patched**: because the exported RLS
+  already keyed on `auth.uid()`/`has_role()`/`current_dept()` (not
+  `USING (true)`), redirecting those three functions to resolve identity
+  from the JWT `GET /auth/data-token` mints (instead of a Supabase Auth
+  session) covers almost all of the real authorization logic. The first
+  pass kept the 14 exported migration files byte-identical and applied them
+  through a filtering/ordering layer (stripping `storage.*`/Realtime
+  statements line-by-line, a bootstrap shim for ordering) — but between
+  dropping Supabase Auth, the role/department model, and the dead
+  single-session/Sheets-sync columns, that "preserve the export" principle
+  (which earns its keep for `apps/assets`, where the change is purely
+  additive RLS narrowing) was mostly adding a second layer of workarounds
+  on top of a schema this ingestion was already substantially rewriting.
+  So `apps/engineering/db/migrations/` (named `db/`, not `supabase/` — this
+  app talks to self-hosted PostgREST/storage-api now, not a Supabase CLI
+  project) is three clean files reflecting the end state directly, no
+  exported-migration patching:
+  - `20260716000000_schema.sql` — enums, tables (with the dead columns
+    genuinely dropped, not left inert), indexes, and every function
+    (`auth.uid()`, `has_role()`, `is_engineering_user()`, `current_dept()`,
+    `ensure_profile()`, `gen_job_code()`, `touch_updated_at()`) + triggers.
+  - `20260716000001_rls.sql` — `engineering_anon`/`engineering_authenticated`
+    roles, RLS policies (same logic the export had, now reading the JWT),
+    and the `EXECUTE` grants those policies need (a real bug caught live:
+    the export's own migrations `REVOKE EXECUTE ... FROM PUBLIC, anon` on
+    `has_role()`/`current_dept()` as hardening, so the new
+    `engineering_authenticated` role needs an explicit grant or every query
+    fails closed with "permission denied for function has_role").
+  - `20260716000002_storage.sql` — the `repair-images` bucket + policies,
+    applied only after `storage-engineering` bootstraps its own schema.
+  - Every statement across all three is idempotent (`IF NOT EXISTS`/
+    `OR REPLACE`/`DROP POLICY IF EXISTS`+`CREATE`/`ON CONFLICT`), so
+    `scripts/migrate.sh` just re-applies all three on every container
+    start — no "already migrated" guard, no line-filtering, no ordering
+    shim required, unlike the first pass.
+  - `engineering-db` / `postgrest-engineering` / `storage-engineering` /
+    `engineering-migrate` in `docker-compose.yml`, mirroring the `assets-*`
+    services' shape (own dedicated Postgres, same storage-schema-visibility
+    grants) without mirroring assets' apply-the-export-as-is mechanics.
+  - Converted from TanStack Start (SSR, Cloudflare Workers target) to a
+    static Vite SPA behind Nginx, same as `apps/assets` and for the same
+    reason: no privileged server-side logic worth preserving once
+    Supabase Auth/single-session/Sheets-sync are gone.
+  - The original export's `supabase/config.toml` (a Supabase-CLI project-id
+    pointer to the hosted project) was deleted outright, and the directory
+    itself renamed `supabase/` → `db/` — nothing in this app talks to that
+    hosted project or the `supabase` CLI anymore, so keeping either the
+    file or the old directory name would mislead a future reader into
+    thinking they still do something here.
+- **Role & department mapping — deliberately still zero changes to
+  CentralHub's own `user_attributes` shape or admin UI**:
+  - **General case**: this app's own admin panel (`RoleRulesPanel.tsx`,
+    reachable only as its "admin" role's own tab) manages `app_role_rules`
+    for `engineering` exactly like `apps/assets` does — e.g.
+    `(department: *, position: Staff, job_level: Junior) → repairer` grants
+    every Staff/Junior user, in any department, the `repairer` role.
+  - **Exception case**: a new, fully generic `app_role_overrides`
+    (`app_id, user_sub, role_code`) table in auth-gateway lets an admin pin
+    one named CentralHub user straight to a role, bypassing the rules —
+    checked first by `resolveRoleCode()` (override → rule → none). Not
+    engineering-specific; any future app using the rules pattern gets this
+    for free.
+  - **Self-lockout guard**: because an override always wins over the
+    rules, an admin overriding their *own* account to a non-admin
+    role_code has no recovery path — the very tab that could undo it
+    requires the admin role_code the override just took away (found live:
+    testing "set dev-admin to หัวหน้าแผนก via an exception rule" locked
+    dev-admin out of the engineering admin panel entirely). Blocked the
+    same way §8 blocks self-revocation for the identical reason — not by
+    building a recovery mechanism: `POST /admin/apps/:appId/role-overrides`
+    (`adminRoleOverrides.ts`) rejects `userSub === ` the caller's own sub
+    with a 400, and `RoleRulesPanel.tsx`'s user picker excludes the
+    logged-in admin from the list so the mistake is hard to make in the
+    first place.
+  - **CentralHub admin is an absolute floor, not just a self-lockout
+    guard**: the self-lockout fix above only prevented an admin from
+    overriding *themselves* — a different admin could still be locked out
+    by someone else's override, or by a rule mismatch. `resolveRoleCode()`
+    (`services/auth-gateway/src/attributes.ts`) now checks a
+    `CENTRALHUB_ADMIN_ROLE_CODE` map *first*, ahead of even an explicit
+    override: any CentralHub Keycloak admin resolves to that app's admin
+    role_code unconditionally, for any app listed in the map. **Opt-in**,
+    keyed by the app's own admin role_code string — not every app's
+    vocabulary uses the literal word "admin", so this only applies to apps
+    that list themselves, hand-maintained the same way `KNOWN_APPS` is:
+    `{ engineering: "admin", assets: "ADM01" }` — every app that actually
+    resolves a role_code via this attributes/rules system at all (both of
+    them; `apps/marketing`/`apps/finance` use the native read/write/edit/
+    delete gate directly with no role_code concept, and `apps/admin`'s own
+    access is Keycloak's admin realm role checked directly by Nginx, so
+    neither has anything to list here). `assets: "ADM01"` reflects that
+    app's own seed-data convention (whichever `role_assignments` row has
+    `is_admin = true`, `ADM01` by convention, not a hardcoded meaning of the
+    string) — update it if that seed ever changes. A direct consequence:
+    for an opted-in app, an override targeting a CentralHub admin (self or
+    otherwise) would now silently never take effect, so `POST /admin/apps/
+    :appId/role-overrides` also rejects that write outright with a clear
+    "would never take effect" error, rather than let an admin believe a
+    dead override worked.
+  - **Department resolution is entirely engineering-owned, zero new
+    auth-gateway tables**: auth-gateway already reads `user_attributes` to
+    match rules, so it just also passes the caller's raw `department`
+    string through as a `dept_name` JWT claim (no new table, no new admin
+    route). This app's own `department_aliases` table (inside
+    engineering-db, managed via a plain PostgREST call from the same admin
+    panel) maps that string to this app's own `departments.id`;
+    `current_dept()` resolves through it live, every request.
+  - `profiles.department_id` is a cache, refreshed by `ensure_profile()`
+    on every login from the same `department_aliases` lookup — not
+    authoritative on its own (`current_dept()` is), but relied on directly
+    by `parts_requisitions`'s own RLS policy and by the UI.
+- **Identity provisioning**: a new `ensure_profile()` `SECURITY DEFINER`
+  Postgres RPC, called once per page load from `useAuth.tsx`, upserts the
+  caller's own `profiles` row (keyed to `auth.uid()`, so a user can only
+  touch their own row) and refreshes its cached `department_id`. Replaces
+  the app's own retired admin-user-creation flow entirely.
+- **Post-ingestion polish, found via live use after the initial pass**:
+  - **Full name instead of a raw code**: `ensure_profile()` originally had
+    no real display name (only a `sub`-derived short code), so every user
+    showed up as e.g. `a1b2c3d4` in the UI. Fixed by adding a `name` claim
+    to the minted JWT (`dataToken.ts`, sourced from the existing CentralHub
+    session — nothing new to look up) and having `ensure_profile()` read
+    and refresh it every call.
+  - **Nav inconsistency**: `AppHeader.tsx` originally put the "← Central
+    Hub" link on the right; every other app's chrome (`packages/ui`'s
+    `AppShell`, `AssetsNav.tsx`) puts it leftmost. Restructured to match.
+  - **Users tab upgraded** into a live-session/attribute view: two
+    sub-tabs ("online now" — a 5-minute `last_seen_at` window, pulsing dot;
+    "login history" — everyone, sorted by recency) showing full CentralHub
+    attributes as badges, plus a locally-computed engineering role_code
+    badge per user. `profiles.last_seen_at`, refreshed by a 3-minute
+    client-side heartbeat (`useAuth.tsx`) in addition to `ensure_profile()`'s
+    normal per-load call. The role badge deliberately computes
+    `resolveLocalRole()` client-side from data the admin panel already
+    fetches (existing `role-rules`/`role-overrides` endpoints) rather than
+    adding a new backend route — accepted simplification, since this is a
+    display-only convenience for the admin, not an authorization decision;
+    it also doesn't replicate the `CENTRALHUB_ADMIN_ROLE_CODE` guarantee
+    check (see below), so it can show a stale/absent badge for a user whose
+    *actual* role_code comes from that guarantee rather than a rule/override
+    — cosmetic only, `resolveRoleCode()` server-side is unaffected.
+  - **Dark mode did nothing**: `styles.css` declared `@custom-variant dark
+    (&:is(.dark *))` (so the toggle button worked — it did add/remove the
+    `.dark` class) but never defined a `.dark { ... }` block overriding any
+    of the color variables, so every variable kept resolving to its `:root`
+    (light) value regardless of the class. Separately, `body`'s background
+    was a hardcoded light-mode `linear-gradient(...)` literal instead of
+    referencing the theme variables, which would have kept fighting a
+    correct `.dark` block anyway. Fixed both: added a `.dark` block (a
+    dark-adapted version of this app's own green/brand palette, not a copy
+    of `apps/assets`' blue-gray one — each app's `.dark` block should stay
+    in its own hue family), and switched the body background to
+    `var(--color-background)`/`var(--color-muted)`.
+  - **Post-cleanup pass**: a stray duplicated `apps/engineering/apps/engineering/`
+    directory (byte-identical copy of `vite.config.ts`/`index.html`) was
+    left over from an earlier file-write tooling quirk mid-ingestion —
+    deleted. `bun.lock` (this repo is a single pnpm workspace, `bun` was
+    never actually used to install anything here) was deleted. `.gitignore`
+    and `eslint.config.js` still had dead entries for the TanStack Start/
+    Cloudflare Workers scaffolding this app dropped in step 1 of the
+    original ingestion (`.output`, `.vinxi`, `.tanstack/**`, `.nitro`,
+    `.wrangler/`, `.dev.vars`, and an ESLint `no-restricted-imports` rule
+    about `@tanstack/react-start/server-only`) — trimmed, since none of it
+    can ever fire again. See §10c's new final-cleanup step for the general
+    version of this checklist.
+- **Known limitations, not built out further this pass** (see §13):
+  - **Realtime job-alert popups/sounds** (`useJobAlerts.ts`) call
+    `supabase.channel(...).on("postgres_changes", ...)` — Supabase
+    Realtime is its own server component, not part of the
+    PostgREST/storage-api pair this ingestion stood up, so these
+    subscriptions currently have nothing to connect to. Left in place
+    (harmless — fails to connect, doesn't crash the page) rather than
+    ripped out, since standing up self-hosted Realtime is a real
+    infrastructure addition of its own, out of scope for this pass.
+  - `AppRole`'s `department_head` value has no dedicated page in the
+    original export either (only admin/leader/repairer/reporter do) — the
+    app shows a "no screen for this role yet" message rather than one being
+    invented here.
+  - `allowed_repair_dept_ids` (a reporter's restricted machine-repair-dept
+    picker) was admin-editable-per-user in the original export; dropped
+    along with the rest of per-user admin editing rather than rebuilt as a
+    rule, since nothing in the app actually read/enforced it even before
+    this ingestion.
+
+---
+
+## 10c. General guidelines for ingesting a third-party app
+
+Consolidated from §10 (`apps/assets`) and §10b (`apps/engineering`) — the
+playbook for onboarding the *next* one. Those two sections are left as
+written above (a record of what each ingestion actually did, warts
+included); this section is the distilled, forward-looking checklist.
+
+**Guiding principle, stated once so it doesn't need repeating per step
+below: prefer a clean rewrite that matches this repo's actual architecture
+and source of truth over patching the export in place, even when the patch
+is less work.** `apps/engineering`'s first pass kept the 14 exported
+migration files byte-identical and layered a filtering/ordering shim on
+top (line-stripping `storage.*`/Realtime statements at apply time, a
+bootstrap copy of `auth.uid()` purely for ordering); the second pass threw
+that away and wrote three clean, idempotent migration files reflecting the
+end state directly. The clean version was strictly better — no ordering
+gotchas, no fragile text-filtering, dead columns actually gone instead of
+inert — for the same reason every time: once an ingestion is rewriting the
+auth model, the role model, and dropping features, "preserve the export
+byte-for-byte" stops being a real constraint and starts being an
+accumulating tax. Reach for the patch-in-place approach only when the
+export's own logic is being kept essentially as-is (e.g. `apps/assets`'
+table/column definitions were never touched, only its RLS layer) — not by
+default.
+
+**1. End state, regardless of what came in**: the app runs entirely on
+this repo's own infrastructure — its own Postgres + PostgREST + storage-api
+— reachable through the existing gateway/auth/RBAC, with no ongoing
+dependency on the SaaS platform (Supabase, Lovable's connector-gateway, or
+anything else) it was exported from or built against.
+
+**2. Pick the enforcement model first.** Use §7's "Choosing an enforcement
+model: native gate vs. minted-JWT/RLS" decision tree. Both ingestions so
+far landed on minted-JWT/RLS (untrusted third-party code, needs row-level
+enforcement) — that won't always be the answer, but decide it explicitly
+before writing anything.
+
+**3. Audit every external dependency the export brought with it, and
+decide its fate explicitly** — don't leave any of them running against
+their original SaaS endpoint, and don't silently work around one without
+recording the decision:
+   - **Auth**: if it's real (its own login, its own session), retire it —
+     CentralHub is the only login for every app in this repo. If it was
+     already a no-op (like `apps/assets`' RPC-based "login"), there's
+     nothing to retire.
+   - **Realtime/websocket/notification integrations**: almost always worth
+     dropping or deferring rather than self-hosting a whole extra service
+     for one feature — document it in §13 rather than leaving a dangling
+     client-side subscription that quietly does nothing (harmless, but
+     worth being honest about in the deferred catalog).
+   - **Third-party connector/webhook integrations** (Sheets, Slack, email,
+     etc.): drop by default. Only re-home to a direct API if the feature is
+     load-bearing for the business and a session explicitly decides so —
+     don't reflexively "port" it.
+   - **Any other SaaS the export's own admin/session logic depended on**:
+     same treatment — retire, and replace with the equivalent CentralHub
+     mechanism if one already exists (see step 5), rather than rebuilding a
+     parallel one.
+
+**4. Self-hosted data layer — mirror the existing shape exactly**:
+   - A dedicated Postgres (`<app>-db`), PostgREST (`postgrest-<app>`), and
+     `supabase/storage-api` (`storage-<app>`) in `docker-compose.yml`, own
+     volumes, own `.env` vars (`<APP>_DB_PASSWORD`, `<APP>_STORAGE_ANON_KEY`,
+     `<APP>_STORAGE_SERVICE_KEY`, all sharing the one `PGRST_JWT_SECRET`).
+   - `apps/<app>/scripts/init-roles.sql` (storage-api's own bootstrap
+     roles — `anon`/`authenticated`/`service_role`, hardcoded by
+     storage-api itself, unrelated to the app-specific PostgREST roles
+     below), `migrate.sh`, and a `Dockerfile` building the one-shot
+     `<app>-migrate` service.
+   - Nginx: a generic `/apps/<app>/` block (free, per Pillar 2) plus two
+     `^~ /apps/<app>/api/rest/v1/` / `/storage/v1/` blocks proxying to
+     `postgrest-<app>`/`storage-<app>` — copy the `apps/assets` blocks in
+     `gateway/conf.d/default.conf` verbatim, s/assets/<app>/.
+
+**5. Migrations — write them fresh, per the guiding principle above**:
+   - Read the export's migrations once to extract the *end-state* schema
+     (final columns, final function bodies, final indexes) — don't apply
+     them as a history. Drop anything only needed for a dependency you
+     retired in step 3 (single-session columns, workflow-login tables,
+     Realtime-enabling statements) — actually drop, don't leave inert.
+   - Write 2-3 clean files: a schema file (enums/tables/indexes/functions/
+     triggers), an RLS+grants file (roles, policies, `EXECUTE` grants —
+     **don't forget these**: if the export's own migrations `REVOKE
+     EXECUTE ... FROM PUBLIC` on any function your policies call, the new
+     `<app>_authenticated` role needs an explicit re-grant or every query
+     fails closed with a bare "permission denied for function ..."), and a
+     storage file (bucket + policies, since the `storage` schema doesn't
+     exist until `storage-<app>` bootstraps it on first start — this is
+     the one genuine ordering constraint, not a workaround).
+   - Every statement idempotent (`CREATE ... IF NOT EXISTS`, `CREATE OR
+     REPLACE FUNCTION`/`TRIGGER`, `DROP POLICY IF EXISTS` + `CREATE`,
+     `INSERT ... ON CONFLICT DO NOTHING`) so `migrate.sh` can simply
+     re-apply every file on every container start — no "is this already
+     migrated" guard, no text-filtering, no bootstrap-for-ordering shim.
+   - `auth.uid()` needs a fresh `auth` schema (self-hosted Postgres has no
+     built-in one) reading the minted JWT's `sub` claim — define it once,
+     in the schema file, before anything that calls it; there is no
+     "apply it twice for ordering" if the schema file is the first thing
+     applied.
+   - Name the directory `apps/<app>/db/migrations/`, not
+     `apps/<app>/supabase/migrations/` — and delete the export's own
+     `supabase/config.toml` (a hosted-project-id pointer). Neither the
+     Supabase CLI nor the hosted project is involved once self-hosted.
+
+**6. Identity, role, and department mapping — CentralHub's own
+`user_attributes`/admin UI never change shape for a new app**:
+   - Extend `GET /auth/data-token` (`services/auth-gateway/src/routes/
+     dataToken.ts`) with whatever extra claims the app's RLS needs
+     (`role_code` and `dept_name` already flow generically to every app;
+     add more only if a specific app's policies need them).
+   - Role resolution: `resolveRoleCode()` already checks a per-user
+     `app_role_overrides` row first, then `app_role_rules` (attribute-based,
+     most-specific-match-wins) — both generic, reusable as-is. A new app
+     only adds rows to these tables (via its own admin panel calling the
+     existing generic `/admin/apps/:appId/role-rules` and
+     `/admin/apps/:appId/role-overrides` routes), never a new auth-gateway
+     table for its own role vocabulary. The overrides endpoint already
+     rejects a caller targeting their own `user_sub` (an override always
+     beats the rules, so self-targeting to a non-admin role_code has no
+     recovery path — see §10b's "self-lockout guard") — a new app's own
+     admin panel should also exclude the logged-in admin from its override
+     user-picker, the same UX guard `RoleRulesPanel.tsx` applies, so this
+     mistake stays hard to make rather than only caught server-side.
+   - Anything that's genuinely specific to the new app (e.g.
+     `apps/engineering`'s CentralHub-department-string → its own
+     `departments.id` mapping) lives entirely inside that app's own
+     database, managed via a plain PostgREST call from that app's admin
+     panel — not bolted onto auth-gateway. The test: would a *second* app
+     ever need this same mapping? If yes, it belongs in auth-gateway
+     (generic); if it's this app's own concept, it belongs in that app's
+     own DB.
+   - Add the new app id to `KNOWN_APPS` (`services/auth-gateway/src/
+     permissions.ts`), `apps/central-hub/src/registry/apps.ts`, and the
+     apps table in §11 — all three, by hand, every time (no dynamic
+     registry yet, see §13).
+   - Seed dev data: a `dev-admin`/`dev-user` permission row
+     (`seedDevPermissions()`) and at least one `app_role_rules` demo row
+     (`seedDevAttributes()`) so a fresh `docker compose up` demonstrates
+     the new app working without manual setup.
+
+**7. Frontend conversion**: convert to a static Vite SPA behind Nginx
+regardless of what the export shipped (SSR, a different bundler, etc.) —
+no app in this repo has server-side logic worth preserving once its own
+auth/session/SaaS-connector layer is gone. Copy `apps/assets`' `vite.config.ts`
+shape (`base: "/apps/<app>/"`, plain `react()`/`tailwindcss()`/
+`tsconfigPaths()` plugins) and `Dockerfile` (multi-stage `pnpm build` →
+`nginx:1.27-alpine`). If the export's own design system conflicts with
+`packages/ui`'s React peer dependency, keep the export's stack and only
+share `packages/ui/src/tokens.css` + the React-free `@centralhub/ui/theme`
+subpath for chrome, exactly like `AssetsNav.tsx`/`AppHeader.tsx` do — don't
+force a peer-dependency downgrade to adopt the shared component library.
+
+**8. Verify against the real running stack, not just a typecheck**: fresh
+`docker compose up`, confirm every one-shot `<app>-migrate` exits 0, drive
+the actual Keycloak Authorization Code flow for both `dev-admin` and
+`dev-user` (a plain Node `fetch` script, see `scripts/test-stack.mjs`),
+confirm `GET /auth/data-token?app=<app>` resolves the expected role/claims,
+and confirm an RLS boundary actually holds (a read-denied query returns
+`[]`/`403`, not just "the client hides the button"). Extend
+`scripts/test-stack.mjs` with the new app's assertions once it's working.
+
+**9. Final cleanup pass — before calling the ingestion done**: the steps
+above focus on getting the app working; do a separate pass afterward
+looking specifically for leftovers, since none of steps 1-8 will catch
+these on their own (`apps/engineering` shipped all of the following on its
+first pass, caught only in a dedicated cleanup afterward):
+   - **Dark mode**: if the export's stylesheet declares `@custom-variant
+     dark (&:is(.dark *))` (shadcn/Tailwind v4's convention), check there's
+     an actual `.dark { ... }` block overriding every color variable the
+     `:root` block sets — declaring the variant without the override block
+     means the toggle button *runs* (adds/removes the class) but visibly
+     does nothing, which reads as "broken" rather than "unfinished" to
+     whoever notices. Also grep for hardcoded color literals (a
+     `linear-gradient(...)` on `body`, an inline hex/oklch) that bypass the
+     theme variables entirely — they'll keep fighting a correct `.dark`
+     block even after it's added.
+   - **Dead scaffolding references**: after step 7 converts the export to
+     a plain Vite SPA, its `.gitignore` and lint config (`eslint.config.js`,
+     etc.) often still reference the framework that was just removed
+     (TanStack Start/Nitro/Vinxi build output, Cloudflare Wrangler, a
+     `no-restricted-imports` rule about a Next.js-specific package) —
+     harmless (they just never match anything again) but worth trimming so
+     a future reader doesn't infer this app still targets that stack.
+   - **Stray files from the ingestion work itself**: check for
+     tooling-quirk leftovers like a duplicated nested directory from a
+     write that didn't land where intended (`find apps/<app> -type f | sort`
+     and eyeball it, or diff any suspicious duplicate paths) — these are
+     easy to introduce mid-session and easy to miss since the app still
+     builds fine with them present.
+   - **Lockfile hygiene**: this repo is a single pnpm workspace
+     (`pnpm-workspace.yaml`) — delete whatever lockfile the export shipped
+     with for a different package manager (`bun.lock`, `yarn.lock`,
+     `package-lock.json`); a second lockfile in an app directory implies a
+     second install path that doesn't actually exist here.
+
+---
+
 ## 11. Apps in this repo
 
 | App | Package | URL | Purpose |
@@ -736,6 +1160,7 @@ first- vs. third-party by fiat**.
 | `apps/finance` | `@apps/finance` | `/apps/finance/` | Placeholder department app; demo RBAC-guarded "Approve budget" action. |
 | `apps/admin` | `@apps/admin` | `/apps/admin/` | Keycloak user list (with a per-user "Revoke session" action, §8, now confirm-gated, §9) + permissions matrix editor (§7). Linked from `central-hub`'s landing grid only for users holding the `admin` role (§9) — that's a discoverability nicety, not the real protection: the `admin`-role Nginx gate is what actually stops access. |
 | `apps/assets` | `@apps/assets` | `/apps/assets/` | First third-party/self-hosted app (§10) — asset purchase requests, registration, transfers; its own Postgres/PostgREST/storage-api, no external SaaS dependency. |
+| `apps/engineering` | `@apps/engineering` | `/apps/engineering/` | Second third-party/self-hosted app (§10b) — machine repair job workflow (report/assign/repair/review); its own Postgres/PostgREST/storage-api, no external SaaS dependency. |
 
 This table is maintained by hand alongside `apps/central-hub/src/registry/apps.ts`
 and `services/auth-gateway/src/permissions.ts`'s `KNOWN_APPS` — update all three
@@ -760,8 +1185,8 @@ when adding or removing an app.
 ## 13. Deferred / not started (catalog)
 
 Consolidated from the sections above, so it's checkable in one place. Split
-into two tables: everything specific to `apps/assets` (§10), then everything
-else.
+into three tables: everything specific to `apps/assets` (§10), everything
+specific to `apps/engineering` (§10b), then everything else.
 
 **`apps/assets`-specific**:
 
@@ -769,6 +1194,21 @@ else.
 |---|---|---|
 | `storage-assets` bucket-metadata admin calls | `apps/assets` self-hosted storage layer (§10) | Needs the service key, not a per-user JWT — object upload/download (what the app actually uses) is unaffected. Currently dormant: no code in `apps/assets` calls a bucket-metadata admin endpoint (the bucket is created once via SQL migration, not at runtime), so there's nothing live to break yet |
 | `apps/assets`'s workflow-role login can't be fully retired | `apps/assets` `role_assignments`/`LoginForm` | The identity→role_code mapping (§10) makes it optional, not obsolete — any user with no matching `app_role_rules` row still needs it; a hypothetical "100% coverage, no fallback" mode isn't built, and retiring it is a data-completeness question, not a code change |
+| Migrations still applied as the exported history, not rewritten clean | `apps/assets/supabase/migrations/` (33 files) | Predates §10c's "rewrite over patch" guideline — was arguably the right call at the time, since `apps/assets`' own table/column definitions were never touched (only its RLS layer, via the `USING (true)` rewrite), the exception case §10c itself calls out. Revisit if a future pass touches this app's schema again anyway |
+| `migrate.sh` filters `storage.*` statements via a line-based `grep -v`, not the safer `sed` range-delete `apps/engineering` moved to | `apps/assets/scripts/migrate.sh` | Works today because every exported `storage.*` statement in this app's 33 migrations happens to be single-line — but it's the same fragile pattern that broke on `apps/engineering`'s one multi-line `CREATE POLICY ... ON storage.objects FOR SELECT\n  USING (...)` (§10b), just not yet triggered here. Latent risk, not an active bug — low priority unless a future migration adds a multi-line storage statement |
+| Exported migrations aren't idempotent, so `migrate.sh` needs an `ALREADY_MIGRATED` guard (`to_regclass('public.asset_purchase_requests')`) instead of always re-applying | `apps/assets/scripts/migrate.sh` | §10c's guideline (every migration statement `IF NOT EXISTS`/`OR REPLACE`/`ON CONFLICT` so the runner can just always re-apply) wasn't established yet when this ingestion happened. Fine as a stable workaround, but would need every table rewritten with `CREATE TABLE IF NOT EXISTS` etc. to actually remove it |
+| `apps/assets/supabase/` directory name and `config.toml` | `apps/assets/supabase/` | Still named `supabase/` (implies a Supabase CLI project) and still has the original hosted project's `config.toml` (`project_id = "jqbotwmiahpnffuqnmwm"`) sitting unused — `apps/engineering` renamed to `db/migrations/` and deleted the equivalent file for exactly this reason (§10b). Purely a naming/dead-file cleanup, no functional risk either way |
+
+**`apps/engineering`-specific**:
+
+| Item | Where it would live | Why deferred |
+|---|---|---|
+| Google Sheets sync | `apps/engineering` (originally `sheets.functions.ts`) | Dropped, not re-homed — keeping it (even against a direct Google API) would retain an external SaaS dependency, exactly what this ingestion pattern exists to remove (§10b) |
+| Realtime job-alert popups/sounds | `apps/engineering/src/hooks/useJobAlerts.ts` | Needs a self-hosted Supabase Realtime service, which this ingestion's compose additions (engineering-db/postgrest-engineering/storage-engineering) don't include — a real infra addition of its own. The hook is left in place (harmless — fails to connect, doesn't crash the page) rather than removed |
+| `department_head` role has no dedicated page | `apps/engineering/src/App.tsx` | The original export never built one either (only admin/leader/repairer/reporter have pages) — shows a "no screen yet" message rather than inventing a UI with no reference to carry over |
+| `allowed_repair_dept_ids` per-reporter restriction | `apps/engineering` `profiles` table | Was admin-editable-per-user in the original export but never actually read/enforced anywhere in the app even before this ingestion; dropped along with the rest of per-user admin editing rather than rebuilt as a rule |
+| Users tab's live-session/attribute view requires the CentralHub Keycloak admin realm role, not this app's resolved `role_code` | `apps/engineering/src/pages/AdminPage.tsx` (`UsersTab`) | It calls the existing `/auth/admin/users(/attributes)` bulk endpoints, which are gated by `requireAdmin` (Keycloak realm role) — coincides with engineering's own `admin` role_code today only because `CENTRALHUB_ADMIN_ROLE_CODE` makes every CentralHub admin resolve to it. A user who reached engineering's `admin` role_code purely via a rule/override (without the Keycloak realm role) would get 403s from this tab specifically, while every other admin-gated engineering feature would still work for them. Not fixed this pass — noted in code and here rather than silently left unknown |
+| `resolveLocalRole()` badge doesn't account for `CENTRALHUB_ADMIN_ROLE_CODE` | `apps/engineering/src/pages/AdminPage.tsx` (`UsersTab`) | Client-side, display-only computation reusing existing endpoints (deliberately kept simple, no new backend route — see §10b); can show a stale/absent role badge for a CentralHub admin whose actual `role_code` comes from the guarantee rather than a rule/override row. Cosmetic only — `resolveRoleCode()` server-side already resolves correctly regardless |
 
 **General**:
 
@@ -793,8 +1233,11 @@ cp environments/.env.example environments/.env
 # fill in every blank value in .env.example: ANTHROPIC_API_KEY (or switch
 # INFERENCE_PROVIDER=local), POSTGRES_PASSWORD, KEYCLOAK_ADMIN_PASSWORD,
 # AUTH_SESSION_SECRET, and (since §10) ASSETS_DB_PASSWORD, PGRST_JWT_SECRET,
-# ASSETS_STORAGE_ANON_KEY, ASSETS_STORAGE_SERVICE_KEY — the last two are
-# HS256 JWTs signed with PGRST_JWT_SECRET, see .env.example's own comments
+# ASSETS_STORAGE_ANON_KEY, ASSETS_STORAGE_SERVICE_KEY, and (since §10b)
+# ENGINEERING_DB_PASSWORD, ENGINEERING_STORAGE_ANON_KEY,
+# ENGINEERING_STORAGE_SERVICE_KEY (shares PGRST_JWT_SECRET with assets) —
+# the *_ANON_KEY/*_SERVICE_KEY pairs are HS256 JWTs signed with
+# PGRST_JWT_SECRET, see .env.example's own comments
 pnpm stack:up
 # open http://localhost:8080/
 
@@ -829,7 +1272,15 @@ pnpm stack:up
   management APIs, `apps/assets`'s data-token minting and identity→role_code
   resolution, real RLS enforcement over `POST/PATCH/DELETE` (including
   flipping a permission via the real admin endpoint mid-run to prove
-  `write:false` → `403` on INSERT, then restoring it), instant session
+  `write:false` → `403` on INSERT, then restoring it), `apps/engineering`'s
+  data-token minting and role_code resolution (dev-admin → `admin` via the
+  `CENTRALHUB_ADMIN_ROLE_CODE` guarantee, dev-user → `repairer` via the
+  seeded attribute rule), a real RLS boundary on `repair_jobs` (a
+  `repairer`-role INSERT attempt gets `403`, not a silent accept), the
+  `ensure_profile()` RPC (confirms a real `full_name` and a freshly-refreshed
+  `last_seen_at`, not just a 200), and the self-lockout / CentralHub-admin
+  override-write guard (`POST .../role-overrides` targeting dev-admin's own
+  sub → `400`, and its role_code stays `admin` afterward), instant session
   revocation, and logout (including that Keycloak's `prompt=login` actually
   forces a fresh credential challenge, not a silent SSO bypass).
 - **Nginx gotcha it specifically guards against**: `error_page 403 =
@@ -852,7 +1303,8 @@ pnpm stack:up
   request-per-request assertion style; verify it by hand (change a role in
   Keycloak's console, wait out the interval, confirm the next request
   reflects it without a force-logout).
-- **Status**: done — 65 assertions, verified to pass cleanly against a fresh
+- **Status**: done — 75 assertions (extended this session with §10b's
+  `apps/engineering` coverage), verified to pass cleanly against a fresh
   stack and to fail with an accurate diagnostic when a permission row is
   corrupted by hand (tested by both routes: flipping the DB row directly,
   and confirming the script's own "granted" checks catch a false-200 from
@@ -865,71 +1317,54 @@ pnpm stack:up
 For whoever (human or agent) picks this repo up next — what changed most
 recently, and where to look first.
 
-**What just happened**: a focused session restyling the Keycloak login page
-only — `keycloak/themes/centralhub/login/resources/css/centralhub.css`,
-CSS-only, no other file touched. Full account in §6's login-theme bullet;
-short version:
-1. Replaced the theme's original standalone pastel-pink/glassy look with
-   the same dark indigo/slate palette `packages/ui/tokens.css` uses
-   everywhere else, plus a responsive card width, field icons, a
-   "CentralHub" masthead + generated sub-header, and layered shadows for
-   depth against a flat dark gradient page background.
-2. Fixed two structural bugs introduced mid-session, both from
-   over-broad CSS selectors matching more of Keycloak's base-theme DOM
-   than intended: a card-nested-inside-a-card (two different elements both
-   getting "the card" styling) and a flex-row masthead sitting beside the
-   card instead of stacked above it.
-3. Fixed field icons disappearing under browser autofill: they were
-   `background-image` on the `<input>` itself, which Chrome/Edge/Safari's
-   autofill silently overwrites. Moved to a `::before` on the `.form-group`
-   wrapper (via `:has()`) instead — a plain div, never autofilled — and
-   added the standard `:-webkit-autofill` inset-`box-shadow` trick to
-   neutralize the blue/yellow autofill tint too.
+**What just happened**: the full `apps/engineering` ingestion (§10b),
+started from a raw Lovable export and taken all the way through a live,
+verified deployment — schema/RLS/storage rewrite, the generic
+override-on-top-of-rules role model (`app_role_overrides`, checked before
+`app_role_rules`), the `CENTRALHUB_ADMIN_ROLE_CODE` absolute-admin
+guarantee (now covering both apps that use the role_code system —
+`engineering: "admin"`, `assets: "ADM01"`), a Users tab upgrade (live
+sessions + login history + a local role badge), several live-testing bug
+fixes (full name display, nav consistency, dark mode), and a final
+cleanup pass (§10c step 9, added this session from what this pass actually
+found). §10b and §10c above are the authoritative account — this note is
+just the map of what to look at.
 
-**How this was actually verified**: no chromium-cli/Playwright was
-preinstalled for this repo, so a throwaway Playwright + headless Chromium
-was installed into the scratch temp dir (not `package.json` — nothing
-added to the repo's own dependencies) to screenshot the real rendered page
-end-to-end against the live `docker compose` stack (Keycloak's theme
-directory is bind-mounted read-only and served uncached under
-`start-dev`, so no container restart is needed between edits — confirmed
-by diffing the live-served CSS against the file on disk). Screenshots at
-desktop + mobile viewports, a simulated autofilled-background state, and
-computed-style/DOM inspection (`page.$eval`) is what actually caught the
-double-card and flex-row bugs above — they were invisible from reading the
-CSS alone, since every individual selector "looked" reasonable in
-isolation.
+**Known-open items** — see §13's tables. Two new engineering-specific rows
+were added this session (both cosmetic, not authorization bugs): the Users
+tab's live-session view 403s for an admin who reached engineering's `admin`
+role_code via a rule/override rather than the actual Keycloak realm role,
+and the client-side role badge doesn't account for the
+`CENTRALHUB_ADMIN_ROLE_CODE` guarantee. Nothing else in §13 changed.
 
-**Local dev credentials** (all dev-only, seeded automatically on
-`docker compose up`, safe to commit): Keycloak login `dev-admin`/
-`devadmin123` (admin realm role) and `dev-user`/`devuser123`. `apps/assets`'s
-own role-picker fallback login (only seen if the identity mapping doesn't
-resolve): `ADM01`/`123456` (full access), or `REQ01`/`APP01`/`AST01`/
-`PUR01`/`ACC01` with the same password for narrower roles.
+**One thing worth flagging, not a code issue**: the live test database
+currently has a real `app_role_overrides` row pinning `dev-user` to
+`leader` (not the original `repairer` demo seed) plus some
+`app_role_rules` edits — both accumulated from manual hands-on testing of
+`RoleRulesPanel.tsx` during this session, not left by any script.
+Resolution behaved exactly as designed the whole time (override wins,
+RBAC boundary still held) — this is just stale demo data, left as-is
+pending a decision on whether to reset it before a fresh demo/handoff.
 
-**Known-open items** are unchanged from before this session — see §13's
-two tables (`apps/assets`-specific and general); nothing in this session
-closed or opened an item there.
+**Verification approach this session**: live Docker Compose testing
+throughout, not just typechecks — real Keycloak Authorization Code flows
+for `dev-admin`/`dev-user` via Node `fetch` scripts, direct `psql` queries
+against auth-gateway's and engineering-db's Postgres to confirm actual
+row-level state, and a rebuild + container restart after every UI-visible
+fix (full name, nav, dark mode) to confirm the change actually rendered,
+not just compiled. The dark-mode bug in particular (§10c step 9) was
+invisible from a typecheck or even a code read — `@custom-variant dark`
+was declared correctly, the toggle correctly added the class, and nothing
+errored; only looking at the actually-rendered page showed the colors
+never changed, because no `.dark` override block existed at all.
 
-**One thing this session did differently — worth calling out for whoever's
-next**: this was a CSS-only theme, so there was no image to rebuild —
-Keycloak's theme directory is bind-mounted (`environments/docker-compose.yml`)
-and served uncached under `start-dev`, so every edit was verified live
-against the running stack on the next request, no `docker compose build`/
-`restart` in the loop at all. Several rounds of user feedback (icon
-invisible under autofill, double-card layout, masthead floating beside
-instead of above the card) only surfaced from actual rendered screenshots,
-not from re-reading the CSS — the same "verify visually, not just
-typecheck-clean" lesson prior sessions in this log already learned for
-app UI work, now confirmed to apply to the Keycloak theme too.
-
-**Git/environment state as of this handoff**: the CSS change described
-above is uncommitted as of this note being written — commit it alongside
-this README update in one commit (see the commit this paragraph ships in).
-`environments/.env` is gitignored and deleted at the end of each session
-per this repo's own convention (see §3/§5) — regenerate it from
-`.env.example` following §14's Quickstart before bringing the stack back
-up.
+**Git/environment state as of this handoff**: all of the above is staged
+for a commit alongside this README update (see the commit this paragraph
+ships in). `environments/.env` is gitignored and deleted at the end of
+each session per this repo's own convention (see §3/§5) — regenerate it
+from `.env.example` following §14's Quickstart before bringing the stack
+back up. The "temporary exception" noted below (volumes/`.env` left in
+place across sessions) is still in effect as of this handoff.
 
 **Temporary exception (dev period only)**: as of this handoff, `environments/.env`
 and the stack's Docker volumes (`centralhub_pgdata`, `centralhub_assets_pgdata`,

@@ -1,11 +1,43 @@
 import { pool } from "./db.js";
 import { findUserSubByUsername } from "./keycloakAdmin.js";
+import { hasRole } from "./roles.js";
 
 export type UserAttributes = {
   department: string;
   position: string;
   jobLevel: string;
 };
+
+// Apps that want "any CentralHub Keycloak admin is automatically this
+// app's admin" as an absolute guarantee — checked first in
+// resolveRoleCode(), ahead of even a per-user override, so a real
+// CentralHub admin can never be locked out of admin access in one of
+// these apps via a rule or override (the exact failure mode this closes:
+// see README's engineering ingestion section on the dev-admin
+// self-lockout incident). Opt-in, keyed by the app's own role_code string
+// for "admin" — not every app's vocabulary uses the literal word.
+// Only lists apps that actually resolve a role_code via this attributes/
+// rules system at all (apps/marketing and apps/finance use the native
+// read/write/edit/delete gate directly, with no role_code concept, so
+// they have nothing to list here; apps/admin's own access is Keycloak's
+// admin realm role checked directly by Nginx, same story). Hand-
+// maintained the same way KNOWN_APPS is.
+const CENTRALHUB_ADMIN_ROLE_CODE: Record<string, string> = {
+  engineering: "admin",
+  // apps/assets' own role_assignments table marks whichever role_code has
+  // is_admin = true as its admin — ADM01 by seed-data convention (see
+  // seedDevAttributes below and the README's assets ingestion section),
+  // not a hardcoded meaning of the string itself. If assets' own seed data
+  // is ever changed to use a different admin code, update this too.
+  assets: "ADM01",
+};
+
+// Exposed so the override-CRUD route can reject a write that would be
+// silently inert (see adminRoleOverrides.ts) — the map itself stays
+// module-private so appId -> role_code is only ever read through here.
+export function guaranteedAdminRoleCodeFor(appId: string): string | null {
+  return CENTRALHUB_ADMIN_ROLE_CODE[appId] ?? null;
+}
 
 export async function getUserAttributes(userSub: string): Promise<UserAttributes | null> {
   const result = await pool.query<{ department: string; position: string; job_level: string }>(
@@ -128,13 +160,59 @@ export async function deleteAppRoleRule(appId: string, id: number): Promise<void
   await pool.query("DELETE FROM app_role_rules WHERE app_id = $1 AND id = $2", [appId, id]);
 }
 
-// Resolves a user's role_code for an app from their generic attributes +
-// that app's rules. A rule matches if every one of its non-null criteria
+export type AppRoleOverride = { id: number; appId: string; userSub: string; roleCode: string };
+
+function toOverride(row: { id: number; app_id: string; user_sub: string; role_code: string }): AppRoleOverride {
+  return { id: row.id, appId: row.app_id, userSub: row.user_sub, roleCode: row.role_code };
+}
+
+export async function listAppRoleOverrides(appId: string): Promise<AppRoleOverride[]> {
+  const result = await pool.query<{ id: number; app_id: string; user_sub: string; role_code: string }>(
+    "SELECT id, app_id, user_sub, role_code FROM app_role_overrides WHERE app_id = $1 ORDER BY id",
+    [appId],
+  );
+  return result.rows.map(toOverride);
+}
+
+export async function upsertAppRoleOverride(appId: string, userSub: string, roleCode: string): Promise<AppRoleOverride> {
+  const result = await pool.query<{ id: number; app_id: string; user_sub: string; role_code: string }>(
+    `INSERT INTO app_role_overrides (app_id, user_sub, role_code)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (app_id, user_sub) DO UPDATE SET role_code = $3
+     RETURNING id, app_id, user_sub, role_code`,
+    [appId, userSub, roleCode],
+  );
+  return toOverride(result.rows[0]);
+}
+
+export async function deleteAppRoleOverride(appId: string, id: number): Promise<void> {
+  await pool.query("DELETE FROM app_role_overrides WHERE app_id = $1 AND id = $2", [appId, id]);
+}
+
+// Resolves a user's role_code for an app. Checked in order: (0) for an app
+// opted into CENTRALHUB_ADMIN_ROLE_CODE above, a CentralHub Keycloak admin
+// always resolves to that app's admin role_code — absolute, wins even over
+// an explicit override, so a real admin can never be scoped down in that
+// app by a rule/override mistake; (1) a per-user override — a named
+// exception that otherwise wins outright regardless of attributes; (2) the
+// app's generic attribute rules, most-specific-match-wins; (3) null if
+// nothing resolves. A rule matches if every one of its non-null criteria
 // columns equals the user's corresponding attribute (a null column is a
-// wildcard, matching any value). Among matching rules, the most specific
-// one wins (most non-null criteria); ties broken by lowest rule id, so
-// rule creation order is a stable, predictable tiebreaker.
+// wildcard, matching any value); ties among equally-specific rules break
+// by lowest rule id, so rule creation order is a stable, predictable
+// tiebreaker.
 export async function resolveRoleCode(userSub: string, appId: string): Promise<string | null> {
+  const guaranteedAdminRoleCode = CENTRALHUB_ADMIN_ROLE_CODE[appId];
+  if (guaranteedAdminRoleCode && (await hasRole(userSub, "admin"))) {
+    return guaranteedAdminRoleCode;
+  }
+
+  const overrideResult = await pool.query<{ role_code: string }>(
+    "SELECT role_code FROM app_role_overrides WHERE app_id = $1 AND user_sub = $2",
+    [appId, userSub],
+  );
+  if (overrideResult.rows[0]) return overrideResult.rows[0].role_code;
+
   const attrs = await getUserAttributes(userSub);
   if (!attrs) return null;
   const rules = await listAppRoleRules(appId);
@@ -180,6 +258,16 @@ export async function seedDevAttributes(maxAttempts = 45, delayMs = 2000): Promi
       await pool.query(
         `INSERT INTO app_role_rules (app_id, role_code, department, position, job_level)
          VALUES ('assets', 'ADM01', NULL, 'Manager', NULL), ('assets', 'REQ01', NULL, 'Staff', NULL)
+         ON CONFLICT ON CONSTRAINT app_role_rules_unique_criteria DO NOTHING`,
+      );
+      // apps/engineering demo rules — dev-admin (Manager) resolves to its
+      // "admin" role; dev-user (any department, Staff/Junior) resolves to
+      // "repairer" via a department-wildcard rule, the exact shape this
+      // ingestion's rule model was designed around (see README's
+      // engineering ingestion section).
+      await pool.query(
+        `INSERT INTO app_role_rules (app_id, role_code, department, position, job_level)
+         VALUES ('engineering', 'admin', NULL, 'Manager', NULL), ('engineering', 'repairer', NULL, 'Staff', 'Junior')
          ON CONFLICT ON CONSTRAINT app_role_rules_unique_criteria DO NOTHING`,
       );
       return;

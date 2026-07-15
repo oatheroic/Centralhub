@@ -11,6 +11,10 @@
 //   - Pillar 4c (instant revocation)            -- admin force-logout, role checks
 //   - §10       (apps/assets self-hosted data)  -- data-token mint + RLS enforcement
 //   - §10       (identity -> role_code mapping)
+//   - §10b      (apps/engineering self-hosted data) -- data-token mint,
+//               role_code resolution (rule + CentralHub-admin guarantee),
+//               RLS enforcement, ensure_profile() provisioning, the
+//               self-lockout / admin-override-write guard
 //   - §12       (inference gateway)             -- reachable only when authenticated
 //
 // Deliberately NOT covered (see README §13 "Deferred / not started"): MFA,
@@ -397,7 +401,7 @@ async function main() {
 
     const matrixRes = await getJson(admin, `${GATEWAY}/auth/admin/permissions`);
     ok("GET /auth/admin/permissions -> 200", matrixRes.status === 200, `status ${matrixRes.status}`);
-    ok("matrix apps == KNOWN_APPS", JSON.stringify((matrixRes.body?.apps || []).slice().sort()) === JSON.stringify(["assets", "finance", "marketing"]), JSON.stringify(matrixRes.body?.apps));
+    ok("matrix apps == KNOWN_APPS", JSON.stringify((matrixRes.body?.apps || []).slice().sort()) === JSON.stringify(["assets", "engineering", "finance", "marketing"]), JSON.stringify(matrixRes.body?.apps));
     const userRow = matrixRes.body?.permissions?.[userSub]?.finance;
     ok("matrix confirms dev-user has no finance access", userRow && !userRow.read && !userRow.write, JSON.stringify(userRow));
   });
@@ -524,16 +528,83 @@ async function main() {
     ok("DELETE test row -> 204", res.status === 204, `status ${res.status}`);
   });
 
-  // -- 9. Inference gateway is reachable only when authenticated (§12) ------
-  section("9. Inference gateway");
+  // -- 9. apps/engineering: data-token, role_code, RLS, provisioning (§10b) --
+  section("9. apps/engineering — data-token, role resolution, RLS, ensure_profile");
+  let engAdminToken, engUserToken;
+  await must("data-token mints for both users, resolving the seeded role_code", async () => {
+    const adminData = await getJson(admin, `${GATEWAY}/auth/data-token?app=engineering`);
+    ok("dev-admin GET /auth/data-token?app=engineering -> 200", adminData.status === 200, `status ${adminData.status}`);
+    ok(
+      "dev-admin role_code resolves to admin (CENTRALHUB_ADMIN_ROLE_CODE guarantee, and the Manager rule agrees)",
+      adminData.body?.role_code === "admin",
+      JSON.stringify(adminData.body),
+    );
+    engAdminToken = adminData.body?.token;
+
+    const userData = await getJson(user, `${GATEWAY}/auth/data-token?app=engineering`);
+    ok("dev-user GET /auth/data-token?app=engineering -> 200", userData.status === 200, `status ${userData.status}`);
+    ok(
+      "dev-user role_code resolves to repairer (department:*, position:Staff, job_level:Junior rule)",
+      userData.body?.role_code === "repairer",
+      JSON.stringify(userData.body),
+    );
+    engUserToken = userData.body?.token;
+  });
+
+  const ENG_REST = `${GATEWAY}/apps/engineering/api/rest/v1`;
+
+  await must("ensure_profile() provisions a profile with a real name and a live heartbeat", async () => {
+    const res = await hop(admin, `${ENG_REST}/rpc/ensure_profile`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${engAdminToken}`, "content-type": "application/json" },
+      body: "{}",
+    });
+    const body = await res.json().catch(() => null);
+    ok("POST rpc/ensure_profile -> 200", res.status === 200, `status ${res.status}`);
+    ok("full_name is a real display name, not the sub-derived short code", typeof body?.full_name === "string" && body.full_name.length > 0, JSON.stringify(body));
+    ok("last_seen_at was just refreshed", typeof body?.last_seen_at === "string" && Date.now() - new Date(body.last_seen_at).getTime() < 60_000, JSON.stringify(body));
+  });
+
+  await must("RLS: a repairer cannot INSERT a repair_jobs row (reporter-only policy)", async () => {
+    // README §10b / the live dev-user-as-leader incident this test guards
+    // against regressing: "reporter insert job" WITH CHECKs has_role(...,
+    // 'reporter') -- any other role's INSERT attempt must fail closed with
+    // 403, not succeed or 500.
+    const res = await hop(user, `${ENG_REST}/repair_jobs`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${engUserToken}`, "content-type": "application/json", prefer: "return=representation" },
+      body: JSON.stringify({ reporter_id: userSub, title: "should be rejected (dev-user is repairer, not reporter)" }),
+    });
+    ok("INSERT repair_jobs as repairer -> 403", res.status === 403, `status ${res.status}`);
+  });
+
+  await must("self-lockout guard: dev-admin cannot set a role override on their own account", async () => {
+    // §10b's "self-lockout guard" -- an override always wins over the
+    // rules, so overriding one's own account has no recovery path through
+    // this UI at all. Also doubles as a smoke test for the
+    // CENTRALHUB_ADMIN_ROLE_CODE write-time guard, since dev-admin holds
+    // the Keycloak admin realm role either way.
+    const res = await hop(admin, `${GATEWAY}/auth/admin/apps/engineering/role-overrides`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userSub: adminSub, roleCode: "department_head" }),
+    });
+    ok("POST role-overrides targeting self -> 400 (rejected, not silently inert)", res.status === 400, `status ${res.status}`);
+
+    const stillAdmin = await getJson(admin, `${GATEWAY}/auth/data-token?app=engineering`);
+    ok("dev-admin's role_code is still admin after the rejected attempt", stillAdmin.body?.role_code === "admin", JSON.stringify(stillAdmin.body));
+  });
+
+  // -- 10. Inference gateway is reachable only when authenticated (§12) -----
+  section("10. Inference gateway");
   await must("authenticated request reaches the provider health check", async () => {
     const res = await getJson(admin, `${GATEWAY}/api/inference/health`);
     ok("GET /api/inference/health (dev-admin) -> 200", res.status === 200, `status ${res.status}`);
     ok("health body reports ok:true", res.body?.ok === true, JSON.stringify(res.body));
   });
 
-  // -- 10. Instant revocation (Pillar 4c) — run LAST for dev-user -----------
-  section("10. Instant session revocation (§8)");
+  // -- 11. Instant revocation (Pillar 4c) — run LAST for dev-user -----------
+  section("11. Instant session revocation (§8)");
   await must("force-logging-out dev-user takes effect on their very next request", async () => {
     const before = await hop(user, `${GATEWAY}/apps/marketing/`);
     ok("dev-user still has a live session before revocation", before.status === 200, `status ${before.status}`);
@@ -552,8 +623,8 @@ async function main() {
     ok("dev-user's /auth/me also 401s post-revocation", meAfter.status === 401, `status ${meAfter.status}`);
   });
 
-  // -- 11. Logout ends both the local session and Keycloak's SSO cookie -----
-  section("11. Logout (Pillar 4a)");
+  // -- 12. Logout ends both the local session and Keycloak's SSO cookie -----
+  section("12. Logout (Pillar 4a)");
   await must("dev-admin logout clears the session and Keycloak SSO", async () => {
     const logout = await hop(admin, `${GATEWAY}/auth/logout`);
     ok("GET /auth/logout -> 200 confirmation page", logout.status === 200, `status ${logout.status}`);
