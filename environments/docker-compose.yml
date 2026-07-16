@@ -142,8 +142,8 @@ services:
   # the hosted Supabase project the app was exported with. Verifies the
   # bearer JWT itself (PGRST_JWT_SECRET, shared with auth-gateway's
   # /auth/data-token minter) and exposes its claims to Postgres as
-  # request.jwt.claims, which the rewritten RLS policies
-  # (apps/assets/supabase/migrations/..._centralhub_rls.sql) check for real
+  # request.jwt.claims, which the RLS policies
+  # (apps/assets/db/migrations/20260707000001_rls.sql) check for real
   # read/write/edit/delete grants — replacing the exported USING (true)
   # policies, which enforced nothing.
   postgrest-assets:
@@ -224,14 +224,14 @@ services:
     networks:
       - centralhub
 
-  # --- One-shot migrator for assets-db: applies the exported migrations
-  # (with their storage.* statements stripped — the `storage` schema doesn't
-  # exist yet at that point) and then, after waiting for storage-assets to
-  # finish its own schema bootstrap, applies the CentralHub RLS-rewrite
-  # migration, which is also where the storage bucket + its real policies
-  # get created. Retries internally rather than using compose health-check
-  # conditions, matching every other service's dependency-readiness pattern
-  # in this file (see auth-gateway's db.ts, Keycloak's own boot).
+  # --- One-shot migrator for assets-db: applies the idempotent
+  # schema/RLS migration files (apps/assets/db/migrations/), then, after
+  # waiting for storage-assets to finish its own schema bootstrap (the
+  # `storage` schema doesn't exist until then), applies the storage
+  # bucket/policies migration. Retries internally rather than using compose
+  # health-check conditions, matching every other service's
+  # dependency-readiness pattern in this file (see auth-gateway's db.ts,
+  # Keycloak's own boot).
   assets-migrate:
     build:
       context: ..
@@ -281,8 +281,8 @@ services:
   # replacing the hosted Supabase project this export was built against.
   # Verifies the bearer JWT itself (PGRST_JWT_SECRET, shared with
   # auth-gateway's /auth/data-token minter) and exposes its claims to
-  # Postgres as request.jwt.claims, which the rewritten RLS policies
-  # (apps/engineering/supabase/migrations/..._centralhub_rls.sql) check for
+  # Postgres as request.jwt.claims, which the RLS policies
+  # (apps/engineering/db/migrations/20260716000001_rls.sql) check for
   # real role/department-scoped access — replacing this export's own real
   # (but Supabase-Auth-backed) RLS with the same logic, now resolved
   # against CentralHub identity instead.
@@ -325,12 +325,11 @@ services:
     networks:
       - centralhub
 
-  # --- One-shot migrator for engineering-db: applies the exported
-  # migrations (with their storage.* statements stripped) and then, after
-  # waiting for storage-engineering to finish its own schema bootstrap,
-  # applies the CentralHub RLS-rewrite migration, which is also where the
-  # storage bucket + its real policies get created. Mirrors assets-migrate
-  # exactly.
+  # --- One-shot migrator for engineering-db: applies the idempotent
+  # schema/RLS migration files (apps/engineering/db/migrations/), then, after
+  # waiting for storage-engineering to finish its own schema bootstrap (the
+  # `storage` schema doesn't exist until then), applies the storage
+  # bucket/policies migration. Mirrors assets-migrate exactly.
   engineering-migrate:
     build:
       context: ..

@@ -1,1 +1,0 @@
-ALTER TABLE public.asset_purchase_requests ADD COLUMN IF NOT EXISTS receive_round integer NOT NULL DEFAULT 0;

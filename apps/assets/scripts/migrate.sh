@@ -1,50 +1,45 @@
 #!/bin/sh
 # One-shot migration runner for assets-db. Two phases, in order:
 #
-# 1. Apply the exported Lovable migrations (apps/assets/supabase/migrations/
-#    *.sql, filename order) against the public schema, with any storage.*
-#    statement stripped out — the `storage` schema doesn't exist until
-#    storage-assets (supabase/storage-api) bootstraps it on its own first
-#    start, which hasn't necessarily happened yet at this point.
-# 2. Wait for storage-assets to report healthy, then apply the CentralHub
-#    RLS-rewrite migration (20260707000000_centralhub_rls.sql) — the one
-#    migration NOT filtered, since it's what creates the storage bucket and
-#    its real policies, and by design must run last.
+# 1. Apply 20260707000000_schema.sql and 20260707000001_rls.sql — every
+#    statement in both is idempotent (IF NOT EXISTS / OR REPLACE / DROP
+#    POLICY IF EXISTS+CREATE / ON CONFLICT), so they're simply re-applied on
+#    every container start; no "is this already migrated" check needed.
+# 2. Wait for storage-assets to report healthy, then apply
+#    20260707000002_storage.sql — split out because the `storage` schema it
+#    references doesn't exist until storage-assets (supabase/storage-api)
+#    bootstraps it on its own first start.
+#
+# These 3 files replace the 32 originally-exported Lovable migrations
+# (applied as history, 2026-05-04 through 2026-06-22) plus the
+# 20260707000000_centralhub_rls.sql rewrite that used to run after them —
+# see 20260707000000_schema.sql's header for why a clean rewrite was safe
+# here (nothing in the export ever dropped a column/table/function), and
+# apps/engineering/scripts/migrate.sh, which this now mirrors exactly.
 set -eu
 
 MIGRATIONS_DIR="/migrations"
-REWRITE_FILE="20260707000000_centralhub_rls.sql"
 
 echo "assets-migrate: waiting for assets-db..."
 until pg_isready -q; do sleep 2; done
 
-# The exported migrations aren't idempotent (plain CREATE TABLE, no IF NOT
-# EXISTS) — fine for a genuinely fresh volume, but a container restart
-# against an already-migrated volume would otherwise fail loudly on the
-# very first file. asset_purchase_requests existing is a reliable signal
-# the exported migrations already ran; the rewrite migration below IS safe
-# to reapply (DROP POLICY IF EXISTS / CREATE OR REPLACE throughout) and
-# always runs.
-ALREADY_MIGRATED=$(psql -tAc "SELECT to_regclass('public.asset_purchase_requests') IS NOT NULL")
-
-if [ "$ALREADY_MIGRATED" = "t" ]; then
-  echo "assets-migrate: exported migrations already applied, skipping to rewrite..."
-else
-  echo "assets-migrate: applying exported migrations (storage.* statements stripped)..."
-  for f in $(ls "$MIGRATIONS_DIR"/*.sql | sort); do
-    base=$(basename "$f")
-    if [ "$base" = "$REWRITE_FILE" ]; then
-      continue
-    fi
-    echo "assets-migrate:   $base"
-    grep -viE "storage\.(buckets|objects)" "$f" | psql -v ON_ERROR_STOP=1 -q
-  done
-fi
+echo "assets-migrate: applying schema + RLS..."
+psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/20260707000000_schema.sql"
+psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/20260707000001_rls.sql"
 
 echo "assets-migrate: waiting for storage-assets..."
 until wget -q -O /dev/null "$STORAGE_HEALTH_URL"; do sleep 2; done
 
-echo "assets-migrate: applying CentralHub RLS rewrite + storage bucket/policies..."
-psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/$REWRITE_FILE"
+echo "assets-migrate: applying storage bucket + policies..."
+psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/20260707000002_storage.sql"
+
+# postgrest-assets caches its schema at boot — it starts in parallel with
+# this migrator (both only depend on assets-db), so its first cache is taken
+# before some of the tables/functions above exist, and every PostgREST call
+# 404s until it reloads. NOTIFY on the "pgrst" channel is PostgREST's own
+# documented reload signal — no restart needed. (apps/engineering already
+# does this; porting it here closes the same latent race in this app.)
+echo "assets-migrate: notifying postgrest-assets to reload its schema cache..."
+psql -v ON_ERROR_STOP=1 -q -c "NOTIFY pgrst, 'reload schema';"
 
 echo "assets-migrate: done."

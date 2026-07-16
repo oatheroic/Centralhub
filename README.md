@@ -729,6 +729,23 @@ first- vs. third-party by fiat**.
   position/job level, previously plain free-text fields, are now managed
   dropdowns with admin-addable values — see "Managed attribute values"
   above.
+- **Note for a future reader**: the paragraphs above are a historical record
+  of what this ingestion actually did — including applying Lovable's 32
+  exported migrations as a literal file-per-change history, plus the
+  `apps/assets/supabase/migrations/20260707000000_centralhub_rls.sql`
+  rewrite layered on top — matching this repo's own convention of leaving
+  ingestion write-ups as-written, warts included. **That is no longer what's
+  on disk.** A later pass (per §10c's guiding principle, once §13's "predates
+  the rewrite-over-patch guideline" items were revisited) replaced all 33
+  files with 3 clean, idempotent files at
+  `apps/assets/db/migrations/` (`20260707000000_schema.sql`,
+  `20260707000001_rls.sql`, `20260707000002_storage.sql`), mirroring
+  `apps/engineering/db/migrations/` exactly — same end-state schema/RLS/seed
+  data, verified column-for-column against the original 33 files, just no
+  longer expressed as incremental history. `apps/assets/scripts/migrate.sh`
+  no longer needs the `grep -v` storage-statement filter or the
+  `ALREADY_MIGRATED` guard as a result — see §13 (rows for both were removed
+  once fixed).
 
 ---
 
@@ -1192,12 +1209,8 @@ specific to `apps/engineering` (§10b), then everything else.
 
 | Item | Where it would live | Why deferred |
 |---|---|---|
-| `storage-assets` bucket-metadata admin calls | `apps/assets` self-hosted storage layer (§10) | Needs the service key, not a per-user JWT — object upload/download (what the app actually uses) is unaffected. Currently dormant: no code in `apps/assets` calls a bucket-metadata admin endpoint (the bucket is created once via SQL migration, not at runtime), so there's nothing live to break yet |
-| `apps/assets`'s workflow-role login can't be fully retired | `apps/assets` `role_assignments`/`LoginForm` | The identity→role_code mapping (§10) makes it optional, not obsolete — any user with no matching `app_role_rules` row still needs it; a hypothetical "100% coverage, no fallback" mode isn't built, and retiring it is a data-completeness question, not a code change |
-| Migrations still applied as the exported history, not rewritten clean | `apps/assets/supabase/migrations/` (33 files) | Predates §10c's "rewrite over patch" guideline — was arguably the right call at the time, since `apps/assets`' own table/column definitions were never touched (only its RLS layer, via the `USING (true)` rewrite), the exception case §10c itself calls out. Revisit if a future pass touches this app's schema again anyway |
-| `migrate.sh` filters `storage.*` statements via a line-based `grep -v`, not the safer `sed` range-delete `apps/engineering` moved to | `apps/assets/scripts/migrate.sh` | Works today because every exported `storage.*` statement in this app's 33 migrations happens to be single-line — but it's the same fragile pattern that broke on `apps/engineering`'s one multi-line `CREATE POLICY ... ON storage.objects FOR SELECT\n  USING (...)` (§10b), just not yet triggered here. Latent risk, not an active bug — low priority unless a future migration adds a multi-line storage statement |
-| Exported migrations aren't idempotent, so `migrate.sh` needs an `ALREADY_MIGRATED` guard (`to_regclass('public.asset_purchase_requests')`) instead of always re-applying | `apps/assets/scripts/migrate.sh` | §10c's guideline (every migration statement `IF NOT EXISTS`/`OR REPLACE`/`ON CONFLICT` so the runner can just always re-apply) wasn't established yet when this ingestion happened. Fine as a stable workaround, but would need every table rewritten with `CREATE TABLE IF NOT EXISTS` etc. to actually remove it |
-| `apps/assets/supabase/` directory name and `config.toml` | `apps/assets/supabase/` | Still named `supabase/` (implies a Supabase CLI project) and still has the original hosted project's `config.toml` (`project_id = "jqbotwmiahpnffuqnmwm"`) sitting unused — `apps/engineering` renamed to `db/migrations/` and deleted the equivalent file for exactly this reason (§10b). Purely a naming/dead-file cleanup, no functional risk either way |
+| `storage-assets` bucket-metadata admin calls | `apps/assets` self-hosted storage layer (§10) | Needs the service key, not a per-user JWT — object upload/download (what the app actually uses) is unaffected. Re-verified (not just carried forward stale): every `supabase.storage` call in `apps/assets/src` is a plain object-level `.upload`/`.getPublicUrl` call against the `asset-images` bucket, authenticated via the per-user JWT; no `createBucket`/`updateBucket`/`listBuckets` call or service-role key anywhere in the frontend. Still dormant, still nothing live to fix |
+| `apps/assets`'s workflow-role login can't be fully retired | `apps/assets` `role_assignments`/`LoginForm` | The identity→role_code mapping (§10) makes it optional, not obsolete — any user with no matching `app_role_rules` row still needs it. Re-verified: unlike `apps/engineering`'s unconditional `ensure_profile()` auto-provisioning, `apps/assets` has no fallback-free path — retiring `LoginForm` needs either accepting broken login for any non-matched real user, or building an assets-side unconditional auto-provisioning feature. A product decision, not a code change |
 
 **`apps/engineering`-specific**:
 
@@ -1317,46 +1330,59 @@ pnpm stack:up
 For whoever (human or agent) picks this repo up next — what changed most
 recently, and where to look first.
 
-**What just happened**: the full `apps/engineering` ingestion (§10b),
-started from a raw Lovable export and taken all the way through a live,
-verified deployment — schema/RLS/storage rewrite, the generic
-override-on-top-of-rules role model (`app_role_overrides`, checked before
-`app_role_rules`), the `CENTRALHUB_ADMIN_ROLE_CODE` absolute-admin
-guarantee (now covering both apps that use the role_code system —
-`engineering: "admin"`, `assets: "ADM01"`), a Users tab upgrade (live
-sessions + login history + a local role badge), several live-testing bug
-fixes (full name display, nav consistency, dark mode), and a final
-cleanup pass (§10c step 9, added this session from what this pass actually
-found). §10b and §10c above are the authoritative account — this note is
-just the map of what to look at.
+**What just happened**: `apps/assets`' migration pipeline was rewritten
+clean, closing all 5 rows in §13's `apps/assets`-specific deferred table.
+The 32 exported Lovable migrations plus the hand-authored
+`20260707000000_centralhub_rls.sql` rewrite (33 files total, applied as
+literal history since the original ingestion) were replaced by 3 clean,
+idempotent files at `apps/assets/db/migrations/`
+(`20260707000000_schema.sql`, `20260707000001_rls.sql`,
+`20260707000002_storage.sql`), mirroring `apps/engineering/db/migrations/`
+exactly — same end-state schema/RLS/seed data, verified column-for-column
+against all 33 original files by reading them directly (not summarized).
+`apps/assets/scripts/migrate.sh` was simplified to match
+`apps/engineering/scripts/migrate.sh`'s shape: the fragile `grep -v`
+storage-statement line filter and the `ALREADY_MIGRATED` guard are both
+gone (unnecessary once every statement is idempotent), and it gained the
+`NOTIFY pgrst, 'reload schema'` call `apps/engineering` already had but
+`apps/assets` was missing — a latent PostgREST schema-cache race, closed
+while aligning the two. `apps/assets/supabase/` was renamed to
+`apps/assets/db/` and the dead `config.toml` (unused hosted-project
+pointer) deleted, matching `apps/engineering`'s own prior cleanup. Two
+stale `.../supabase/migrations/...` comments in
+`environments/docker-compose.yml` (one for each app; engineering's own
+comment was already stale from its own earlier rename) were fixed as a
+drive-by. §10's own historical write-up was left untouched per this
+repo's "record what actually happened" convention, with a pointer note
+added directing a reader to the new `db/migrations/` location. See §10's
+new closing note and §13 for the full before/after.
 
-**Known-open items** — see §13's tables. Two new engineering-specific rows
-were added this session (both cosmetic, not authorization bugs): the Users
-tab's live-session view 403s for an admin who reached engineering's `admin`
-role_code via a rule/override rather than the actual Keycloak realm role,
-and the client-side role badge doesn't account for the
-`CENTRALHUB_ADMIN_ROLE_CODE` guarantee. Nothing else in §13 changed.
+**Known-open items** — see §13's tables. The two remaining
+`apps/assets`-specific rows (storage-admin service-key gap, workflow-role
+login retirement) were re-investigated this session, not just carried
+forward: both confirmed still accurate and genuinely not actionable without
+either nothing-to-fix (storage admin) or a product decision (workflow-role
+login) — see §13 for the updated wording. Nothing else in §13 changed.
 
-**One thing worth flagging, not a code issue**: the live test database
-currently has a real `app_role_overrides` row pinning `dev-user` to
-`leader` (not the original `repairer` demo seed) plus some
-`app_role_rules` edits — both accumulated from manual hands-on testing of
-`RoleRulesPanel.tsx` during this session, not left by any script.
-Resolution behaved exactly as designed the whole time (override wins,
-RBAC boundary still held) — this is just stale demo data, left as-is
-pending a decision on whether to reset it before a fresh demo/handoff.
-
-**Verification approach this session**: live Docker Compose testing
-throughout, not just typechecks — real Keycloak Authorization Code flows
-for `dev-admin`/`dev-user` via Node `fetch` scripts, direct `psql` queries
-against auth-gateway's and engineering-db's Postgres to confirm actual
-row-level state, and a rebuild + container restart after every UI-visible
-fix (full name, nav, dark mode) to confirm the change actually rendered,
-not just compiled. The dark-mode bug in particular (§10c step 9) was
-invisible from a typecheck or even a code read — `@custom-variant dark`
-was declared correctly, the toggle correctly added the class, and nothing
-errored; only looking at the actually-rendered page showed the colors
-never changed, because no `.dark` override block existed at all.
+**Verification approach this session**: read all 33 original migration
+files directly (not just a summary) before writing the replacements, to
+guarantee the rewrite is byte-accurate to the exported end state, not just
+"looks right." Then verified against the real running stack: rebuilt
+`assets-migrate`'s image and ran it twice against the existing (already
+years-old-by-container-standards, already-migrated) `assets-db` volume —
+both runs exited 0, confirming restart-idempotency now that the
+`ALREADY_MIGRATED` guard is gone. Queried the live database directly
+afterward to confirm the schema matches exactly: 90 columns on
+`asset_purchase_requests`, 17 functions, 24 public-schema RLS policies (6
+tables × 4 verbs) + 4 storage policies, 6 seeded `role_assignments` rows,
+8 seeded `cc_recipient` dropdown rows. Ran the full `pnpm test:stack`
+suite (75 assertions) clean, including the `apps/assets` RLS-boundary
+checks (§16) that exercise the rewritten policies end-to-end. A true
+fresh-volume test (wiping `centralhub_assets_pgdata` entirely) was
+considered but not run — the restart-against-already-migrated-volume test
+above is the more realistic scenario given this repo's own
+volume-persistence convention (see the "Temporary exception" note below),
+and the schema/function/policy counts already confirm no drift.
 
 **Git/environment state as of this handoff**: all of the above is staged
 for a commit alongside this README update (see the commit this paragraph

@@ -1,19 +1,21 @@
--- CentralHub ingestion rewrite: every policy in the exported migrations
--- above is USING (true)/WITH CHECK (true) — RLS is enabled but enforces
--- nothing; the anon key alone is enough to read/write/delete any row. This
--- migration replaces that with real checks against the JWT that
--- auth-gateway's GET /auth/data-token mints (see services/auth-gateway),
--- signed with the same PGRST_JWT_SECRET postgrest-assets verifies.
+-- RLS + grants for apps/assets, applied after 20260707000000_schema.sql.
+-- Every exported migration's own policy was USING (true)/WITH CHECK (true)
+-- — RLS was enabled but enforced nothing; the (public, bundle-embedded)
+-- anon key alone could read/write/delete any row. This file replaces that
+-- with real checks against the JWT that auth-gateway's GET /auth/data-token
+-- mints (see services/auth-gateway), signed with the same PGRST_JWT_SECRET
+-- postgrest-assets verifies.
 --
 -- The minted JWT's shape is: { "role": "assets_authenticated", "sub": "<centralhub user id>",
 -- "perm": { "read": bool, "write": bool, "edit": bool, "delete": bool } }
 -- — the same four-verb model every other app's app_permissions row already
 -- uses (see services/auth-gateway/src/permissions.ts).
 --
--- Applied AFTER storage-assets has bootstrapped its own `storage` schema
--- (see apps/assets/scripts/migrate.sh) — the exported migrations' storage.*
--- statements were stripped before those ran for exactly that reason; this
--- file is where the bucket and its policies actually get created.
+-- Idempotent throughout (DROP POLICY IF EXISTS + CREATE), so this re-applies
+-- cleanly on every container start alongside the schema file — no
+-- "already migrated" guard needed. See 20260707000002_storage.sql for the
+-- storage-schema counterpart, applied separately since that schema doesn't
+-- exist until storage-assets bootstraps it.
 
 DO $$
 BEGIN
@@ -74,8 +76,7 @@ CREATE POLICY "centralhub update options" ON public.dropdown_options FOR UPDATE 
 DROP POLICY IF EXISTS "centralhub delete options" ON public.dropdown_options;
 CREATE POLICY "centralhub delete options" ON public.dropdown_options FOR DELETE USING (public.centralhub_perm('delete'));
 
--- doc_number_sequences: stays locked down entirely (matches the exported
--- 20260604035455 migration's own intent) — reachable only via the
+-- doc_number_sequences: stays locked down entirely — reachable only via the
 -- SECURITY DEFINER generate_doc_number()/peek_next_doc_number() functions,
 -- not directly through PostgREST.
 DROP POLICY IF EXISTS "public all seq" ON public.doc_number_sequences;
@@ -123,6 +124,8 @@ DROP POLICY IF EXISTS "centralhub update dept pw" ON public.department_passwords
 CREATE POLICY "centralhub update dept pw" ON public.department_passwords FOR UPDATE USING (public.centralhub_perm('edit')) WITH CHECK (public.centralhub_perm('edit'));
 DROP POLICY IF EXISTS "centralhub delete dept pw" ON public.department_passwords;
 CREATE POLICY "centralhub delete dept pw" ON public.department_passwords FOR DELETE USING (public.centralhub_perm('delete'));
+GRANT EXECUTE ON FUNCTION public.verify_department_password(text, text) TO assets_authenticated;
+GRANT EXECUTE ON FUNCTION public.set_department_password(text, text, text, text) TO assets_authenticated;
 
 -- person_receive_passwords
 DROP POLICY IF EXISTS "public read prp" ON public.person_receive_passwords;
@@ -139,6 +142,10 @@ DROP POLICY IF EXISTS "centralhub update prp" ON public.person_receive_passwords
 CREATE POLICY "centralhub update prp" ON public.person_receive_passwords FOR UPDATE USING (public.centralhub_perm('edit')) WITH CHECK (public.centralhub_perm('edit'));
 DROP POLICY IF EXISTS "centralhub delete prp" ON public.person_receive_passwords;
 CREATE POLICY "centralhub delete prp" ON public.person_receive_passwords FOR DELETE USING (public.centralhub_perm('delete'));
+GRANT EXECUTE ON FUNCTION public.verify_person_receive_password(text, text) TO assets_authenticated;
+GRANT EXECUTE ON FUNCTION public.admin_upsert_person_receive_password(text, text, text, text) TO assets_authenticated;
+GRANT EXECUTE ON FUNCTION public.admin_set_person_receive_active(text, text, text, boolean) TO assets_authenticated;
+GRANT EXECUTE ON FUNCTION public.admin_rename_person_receive(text, text, text, text) TO assets_authenticated;
 
 -- asset_transfer_history
 DROP POLICY IF EXISTS "public read transfer history" ON public.asset_transfer_history;
@@ -154,68 +161,3 @@ DROP POLICY IF EXISTS "centralhub update transfer history" ON public.asset_trans
 CREATE POLICY "centralhub update transfer history" ON public.asset_transfer_history FOR UPDATE USING (public.centralhub_perm('edit')) WITH CHECK (public.centralhub_perm('edit'));
 DROP POLICY IF EXISTS "centralhub delete transfer history" ON public.asset_transfer_history;
 CREATE POLICY "centralhub delete transfer history" ON public.asset_transfer_history FOR DELETE USING (public.centralhub_perm('delete'));
-
--- Storage bucket + policies — created here, not in the exported migrations,
--- because the `storage` schema doesn't exist until storage-assets
--- (supabase/storage-api) bootstraps it on first start. See
--- apps/assets/scripts/migrate.sh for the wait/ordering.
---
--- storage-api does `SELECT set_config('role', 'service_role'|'anon'|...,
--- true)` per request (a mid-transaction role switch, like PostgREST's) —
--- without USAGE on this schema, the switched-to role can't see
--- storage.buckets/storage.objects at all, and Postgres reports the
--- misleading "relation does not exist" (not "permission denied") since the
--- parser can't resolve the name to a visible object at all. Root-caused by
--- watching assets-db's query log (log_statement=all) during a live 500 from
--- GET /bucket/asset-images.
-GRANT USAGE ON SCHEMA storage TO anon, authenticated, service_role;
-GRANT ALL ON ALL TABLES IN SCHEMA storage TO service_role;
-GRANT SELECT ON ALL TABLES IN SCHEMA storage TO anon, authenticated;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA storage TO service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA storage GRANT ALL ON TABLES TO service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA storage GRANT SELECT ON TABLES TO anon, authenticated;
-
--- Real end-user requests carry role "assets_authenticated" (from
--- GET /auth/data-token, see services/auth-gateway/src/routes/dataToken.ts),
--- not storage-api's own "anon"/"authenticated"/"service_role" — the grants
--- above only cover storage-api's own bootstrap/admin traffic. Same schema-
--- visibility gap, same fix, different role: found by testing an actual
--- object upload as dev-user and hitting "relation "objects" does not
--- exist" despite RLS being satisfied — the request never got that far.
-GRANT USAGE ON SCHEMA storage TO assets_anon, assets_authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA storage TO assets_authenticated;
-GRANT SELECT ON ALL TABLES IN SCHEMA storage TO assets_anon;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA storage TO assets_authenticated;
-
-INSERT INTO storage.buckets (id, name, public)
-VALUES ('asset-images', 'asset-images', true)
-ON CONFLICT (id) DO NOTHING;
-
-DROP POLICY IF EXISTS "public read asset-images" ON storage.objects;
-DROP POLICY IF EXISTS "public upload asset-images" ON storage.objects;
-DROP POLICY IF EXISTS "public update asset-images" ON storage.objects;
-DROP POLICY IF EXISTS "public delete asset-images" ON storage.objects;
-DROP POLICY IF EXISTS "centralhub read asset-images" ON storage.objects;
-CREATE POLICY "centralhub read asset-images" ON storage.objects FOR SELECT USING (bucket_id = 'asset-images' AND public.centralhub_perm('read'));
-DROP POLICY IF EXISTS "centralhub upload asset-images" ON storage.objects;
-CREATE POLICY "centralhub upload asset-images" ON storage.objects FOR INSERT WITH CHECK (bucket_id = 'asset-images' AND public.centralhub_perm('write'));
-DROP POLICY IF EXISTS "centralhub update asset-images" ON storage.objects;
-CREATE POLICY "centralhub update asset-images" ON storage.objects FOR UPDATE USING (bucket_id = 'asset-images' AND public.centralhub_perm('edit'));
-DROP POLICY IF EXISTS "centralhub delete asset-images" ON storage.objects;
-CREATE POLICY "centralhub delete asset-images" ON storage.objects FOR DELETE USING (bucket_id = 'asset-images' AND public.centralhub_perm('delete'));
-
--- Seed cc_recipients (สำเนาถึง) — a gap in the original export: 'recipient'
--- (เรียน, single-select) was seeded but 'cc_recipient' (multi-select) never
--- was, leaving the CC field with an empty option list. Same person/
--- department pool as 'recipient'. ON CONFLICT DO NOTHING since this file
--- reruns against already-migrated volumes (see migrate.sh).
-INSERT INTO public.dropdown_options (category, value, sort_order) VALUES
-('cc_recipient', 'คุณปราณี ทัศวิชัย', 1),
-('cc_recipient', 'คุณปวิตรา ทัศวิชัย', 2),
-('cc_recipient', 'คุณอนณ ทัศวิชัย', 3),
-('cc_recipient', 'คุณสุทัตตา ทัศวิชัย', 4),
-('cc_recipient', 'คุณชัยณรงค์ คงวุ่น', 5),
-('cc_recipient', 'แผนกทรัพย์สิน', 6),
-('cc_recipient', 'แผนกจัดซื้อ', 7),
-('cc_recipient', 'แผนกบัญชี', 8)
-ON CONFLICT (category, value) DO NOTHING;

@@ -1,2 +1,0 @@
-UPDATE public.dropdown_options SET value = REPLACE(value, 'ขายเทริน', 'ขายเทิร์น') WHERE value LIKE '%ขายเทริน%';
-UPDATE public.asset_purchase_requests SET asset_disposal_method = REPLACE(asset_disposal_method, 'ขายเทริน', 'ขายเทิร์น') WHERE asset_disposal_method LIKE '%ขายเทริน%';
