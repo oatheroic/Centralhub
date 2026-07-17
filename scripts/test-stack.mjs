@@ -11,6 +11,8 @@
 //   - Pillar 4c (instant revocation)            -- admin force-logout, role checks
 //   - §10       (apps/assets self-hosted data)  -- data-token mint + RLS enforcement
 //   - §10       (identity -> role_code mapping)
+//   - §10       (managed attribute values CRUD -- rename/delete, and
+//               role-rule creation rejecting unlisted values)
 //   - §10b      (apps/engineering self-hosted data) -- data-token mint,
 //               role_code resolution (rule + CentralHub-admin guarantee),
 //               RLS enforcement, ensure_profile() provisioning, the
@@ -23,7 +25,7 @@
 // re-sync poller (§8) is built but also isn't covered here — its effect
 // only becomes observable after waiting out a full ROLE_SYNC_INTERVAL_MS
 // tick, which doesn't fit this script's request-per-request assertion
-// style; see README §16 for how to verify it by hand.
+// style; see README §15 for how to verify it by hand.
 //
 // Usage:
 //   node scripts/test-stack.mjs
@@ -420,6 +422,62 @@ async function main() {
   await must("admin cannot revoke their own session", async () => {
     const selfRevoke = await hop(admin, `${GATEWAY}/auth/admin/sessions/${adminSub}/revoke`, { method: "PUT" });
     ok("dev-admin self-revoke -> 400 (blocked server-side)", selfRevoke.status === 400, `status ${selfRevoke.status}`);
+  });
+
+  // -- 6b. Managed attribute values CRUD (§10) -------------------------------
+  section("6b. Managed attribute values — rename/delete CRUD and role-rule validation");
+  await must("add/rename/delete round-trips for an unused value", async () => {
+    const original = `ZZ-Test-Dept-${Date.now()}`;
+    const renamed = `${original}-renamed`;
+
+    const created = await getJson(admin, `${GATEWAY}/auth/admin/attribute-values/department`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: original }),
+    });
+    ok("POST attribute-values/department -> 201", created.status === 201 && created.body.includes(original), JSON.stringify(created.body));
+
+    const renamedRes = await getJson(admin, `${GATEWAY}/auth/admin/attribute-values/department/${encodeURIComponent(original)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ newValue: renamed }),
+    });
+    ok(
+      "PUT rename -> 200, old name gone, new name present",
+      renamedRes.status === 200 && renamedRes.body.includes(renamed) && !renamedRes.body.includes(original),
+      JSON.stringify(renamedRes.body),
+    );
+
+    const deleteRes = await hop(admin, `${GATEWAY}/auth/admin/attribute-values/department/${encodeURIComponent(renamed)}`, {
+      method: "DELETE",
+    });
+    ok("DELETE unused value -> 204", deleteRes.status === 204, `status ${deleteRes.status}`);
+
+    const afterDelete = await getJson(admin, `${GATEWAY}/auth/admin/attribute-values/department`);
+    ok("value no longer listed after delete", !afterDelete.body.includes(renamed), JSON.stringify(afterDelete.body));
+  });
+
+  await must("delete is blocked while a value is still in use", async () => {
+    // "Purchasing" is dev-user's seeded department (seedDevAttributes()) --
+    // must still be assigned at this point in the run, so this is a real
+    // in-use check, not a value nobody references.
+    const res = await getJson(admin, `${GATEWAY}/auth/admin/attribute-values/department/${encodeURIComponent("Purchasing")}`, {
+      method: "DELETE",
+    });
+    ok("DELETE in-use value -> 409", res.status === 409, `status ${res.status}`);
+    ok("409 body reports at least one usage count", (res.body?.usage?.userAttributes ?? 0) + (res.body?.usage?.roleRules ?? 0) > 0, JSON.stringify(res.body));
+
+    const stillListed = await getJson(admin, `${GATEWAY}/auth/admin/attribute-values/department`);
+    ok("blocked value is still listed (not deleted)", stillListed.body.includes("Purchasing"), JSON.stringify(stillListed.body));
+  });
+
+  await must("role-rule creation rejects a department not in the managed list", async () => {
+    const res = await getJson(admin, `${GATEWAY}/auth/admin/apps/assets/role-rules`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ roleCode: "ZZTEST", department: `Not-A-Real-Dept-${Date.now()}`, position: null, jobLevel: null }),
+    });
+    ok("POST role-rules with unlisted department -> 400", res.status === 400, `status ${res.status}`);
   });
 
   // -- 7. apps/assets: data-token + identity->role_code mapping (§10) -------

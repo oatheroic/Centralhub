@@ -12,6 +12,7 @@ import {
   type DataTableColumn,
 } from "@centralhub/ui";
 import { AttributeSelect } from "./components/AttributeSelect";
+import { AttributeValueManagerDialog } from "./components/AttributeValueManagerDialog";
 
 type AdminUser = {
   id: string;
@@ -282,6 +283,24 @@ function PermissionsPanel() {
   );
 }
 
+function ManagedColumnHeader({ label, onManage }: { label: string; onManage: () => void }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      {label}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onManage();
+        }}
+        className="text-xs font-normal text-accent hover:underline"
+      >
+        Manage
+      </button>
+    </span>
+  );
+}
+
 function UsersPanel() {
   const [users, setUsers] = useState<AdminUser[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -296,7 +315,14 @@ function UsersPanel() {
   const [attributeValues, setAttributeValues] = useState<Record<AttributeKind, string[]>>(
     EMPTY_ATTRIBUTE_VALUES,
   );
+  const [manageKind, setManageKind] = useState<AttributeKind | null>(null);
   const toast = useToast();
+
+  function refetchAttrDrafts() {
+    fetch("/auth/admin/users/attributes", { credentials: "same-origin" })
+      .then((res) => (res.ok ? (res.json() as Promise<Record<string, UserAttributes>>) : {}))
+      .then(setAttrDrafts);
+  }
 
   useEffect(() => {
     fetch("/auth/admin/users", { credentials: "same-origin" })
@@ -376,6 +402,58 @@ function UsersPanel() {
     }
   }
 
+  async function renameAttributeValue(kind: AttributeKind, oldValue: string, newValue: string) {
+    try {
+      const res = await fetch(`/auth/admin/attribute-values/${kind}/${encodeURIComponent(oldValue)}`, {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ newValue }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error ?? `${res.status}`);
+      }
+      const values = (await res.json()) as string[];
+      setAttributeValues((prev) => ({ ...prev, [kind]: values }));
+      refetchAttrDrafts();
+    } catch (err) {
+      toast.show({
+        tone: "danger",
+        title: "Couldn't rename value",
+        description: (err as Error).message,
+      });
+    }
+  }
+
+  async function deleteAttributeValue(kind: AttributeKind, value: string): Promise<{ blocked: boolean; message?: string }> {
+    try {
+      const res = await fetch(`/auth/admin/attribute-values/${kind}/${encodeURIComponent(value)}`, {
+        method: "DELETE",
+        credentials: "same-origin",
+      });
+      if (res.status === 409) {
+        const body = (await res.json()) as { usage?: { userAttributes: number; roleRules: number } };
+        const usage = body.usage;
+        const parts = [
+          usage?.userAttributes ? `${usage.userAttributes} user(s)` : null,
+          usage?.roleRules ? `${usage.roleRules} role rule(s)` : null,
+        ].filter(Boolean);
+        return { blocked: true, message: `still used by ${parts.join(" and ")}` };
+      }
+      if (!res.ok) throw new Error(`${res.status}`);
+      setAttributeValues((prev) => ({ ...prev, [kind]: prev[kind].filter((v) => v !== value) }));
+      return { blocked: false };
+    } catch (err) {
+      toast.show({
+        tone: "danger",
+        title: "Couldn't delete value",
+        description: (err as Error).message,
+      });
+      return { blocked: false };
+    }
+  }
+
   async function confirmRevoke() {
     if (!revokeTarget) return;
     const { id, name } = revokeTarget;
@@ -425,7 +503,7 @@ function UsersPanel() {
     },
     {
       key: "department",
-      header: "Department",
+      header: <ManagedColumnHeader label="Department" onManage={() => setManageKind("department")} />,
       render: (user) => (
         <AttributeSelect
           value={attrDrafts[user.id]?.department ?? ""}
@@ -438,7 +516,7 @@ function UsersPanel() {
     },
     {
       key: "position",
-      header: "Position",
+      header: <ManagedColumnHeader label="Position" onManage={() => setManageKind("position")} />,
       render: (user) => (
         <AttributeSelect
           value={attrDrafts[user.id]?.position ?? ""}
@@ -451,7 +529,7 @@ function UsersPanel() {
     },
     {
       key: "jobLevel",
-      header: "Job level",
+      header: <ManagedColumnHeader label="Job level" onManage={() => setManageKind("job_level")} />,
       render: (user) => (
         <AttributeSelect
           value={attrDrafts[user.id]?.jobLevel ?? ""}
@@ -507,6 +585,17 @@ function UsersPanel() {
         danger
         onConfirm={confirmRevoke}
       />
+
+      {manageKind && (
+        <AttributeValueManagerDialog
+          open={manageKind !== null}
+          onOpenChange={(open) => !open && setManageKind(null)}
+          label={manageKind === "job_level" ? "job levels" : `${manageKind}s`}
+          values={attributeValues[manageKind]}
+          onRename={(oldValue, newValue) => renameAttributeValue(manageKind, oldValue, newValue)}
+          onDelete={(value) => deleteAttributeValue(manageKind, value)}
+        />
+      )}
     </section>
   );
 }

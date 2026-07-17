@@ -1,10 +1,21 @@
 import { useEffect, useState } from "react";
 import { useCurrentRoleInfo } from "@/lib/role";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card } from "@/components/ui/card";
+import {
+  Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
+} from "@/components/ui/select";
+import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
+
+// Wildcard sentinel — Radix Select can't use an empty string as an item
+// value, so "any value for this criterion" (the existing NULL-column
+// meaning, see auth-gateway's resolveRoleCode()) is represented by this
+// string on the wire and translated to null right before POST.
+const ANY = "__any__";
+
+type AttributeKind = "department" | "position" | "job_level";
 
 // Manages this app's rules translating CentralHub's generic corporate
 // attributes (department/position/job level, set in apps/admin's Users
@@ -22,16 +33,28 @@ type Rule = {
   jobLevel: string | null;
 };
 
+type RoleOption = { role_code: string; display_name: string };
+
 const APP_ID = "assets";
 
 export default function RoleRulesPanel() {
   const me = useCurrentRoleInfo();
   const [rules, setRules] = useState<Rule[]>([]);
   const [roleCode, setRoleCode] = useState("");
-  const [department, setDepartment] = useState("");
-  const [position, setPosition] = useState("");
-  const [jobLevel, setJobLevel] = useState("");
+  const [department, setDepartment] = useState(ANY);
+  const [position, setPosition] = useState(ANY);
+  const [jobLevel, setJobLevel] = useState(ANY);
   const [busy, setBusy] = useState(false);
+  const [attributeValues, setAttributeValues] = useState<Record<AttributeKind, string[]>>({
+    department: [],
+    position: [],
+    job_level: [],
+  });
+  // This app's own local role_code vocabulary (ADM01, PUR01, ...) — lives in
+  // assets-db's role_assignments table, not CentralHub's Postgres, so it's
+  // fetched via this app's own PostgREST client rather than an auth-gateway
+  // route (same table PasswordManagerPanel already manages).
+  const [roleOptions, setRoleOptions] = useState<RoleOption[]>([]);
 
   async function load() {
     const res = await fetch(`/auth/admin/apps/${APP_ID}/role-rules`, { credentials: "same-origin" });
@@ -39,6 +62,17 @@ export default function RoleRulesPanel() {
   }
   useEffect(() => {
     load();
+    (["department", "position", "job_level"] as const).forEach((kind) => {
+      fetch(`/auth/admin/attribute-values/${kind}`, { credentials: "same-origin" })
+        .then((res) => (res.ok ? (res.json() as Promise<string[]>) : []))
+        .then((values) => setAttributeValues((prev) => ({ ...prev, [kind]: values })));
+    });
+    supabase
+      .from("role_assignments")
+      .select("role_code,display_name")
+      .eq("is_active", true)
+      .order("role_code")
+      .then(({ data }) => setRoleOptions((data as RoleOption[]) ?? []));
   }, []);
 
   if (!me?.is_admin) {
@@ -50,8 +84,8 @@ export default function RoleRulesPanel() {
   }
 
   async function submit() {
-    if (!roleCode.trim()) {
-      toast.error("กรุณากรอกรหัสผู้ใช้ (role_code)");
+    if (!roleCode) {
+      toast.error("กรุณาเลือกรหัสผู้ใช้ (role_code)");
       return;
     }
     setBusy(true);
@@ -61,17 +95,17 @@ export default function RoleRulesPanel() {
         credentials: "same-origin",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          roleCode: roleCode.trim().toUpperCase(),
-          department: department.trim() || null,
-          position: position.trim() || null,
-          jobLevel: jobLevel.trim() || null,
+          roleCode,
+          department: department === ANY ? null : department,
+          position: position === ANY ? null : position,
+          jobLevel: jobLevel === ANY ? null : jobLevel,
         }),
       });
       if (!res.ok) throw new Error(`${res.status}`);
       setRoleCode("");
-      setDepartment("");
-      setPosition("");
-      setJobLevel("");
+      setDepartment(ANY);
+      setPosition(ANY);
+      setJobLevel(ANY);
       toast.success("เพิ่มกฎสำเร็จ");
       load();
     } catch (err) {
@@ -144,19 +178,46 @@ export default function RoleRulesPanel() {
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 items-end border-t pt-4">
         <div>
           <Label>Role code *</Label>
-          <Input value={roleCode} onChange={(e) => setRoleCode(e.target.value)} placeholder="เช่น PUR01" />
+          <Select value={roleCode} onValueChange={setRoleCode}>
+            <SelectTrigger><SelectValue placeholder="เลือกรหัสผู้ใช้" /></SelectTrigger>
+            <SelectContent>
+              {roleOptions.map((r) => (
+                <SelectItem key={r.role_code} value={r.role_code}>
+                  {r.role_code} — {r.display_name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
         <div>
           <Label>แผนก (ว่าง = ทุกแผนก)</Label>
-          <Input value={department} onChange={(e) => setDepartment(e.target.value)} />
+          <Select value={department} onValueChange={setDepartment}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ANY}>(ทุกแผนก)</SelectItem>
+              {attributeValues.department.map((v) => <SelectItem key={v} value={v}>{v}</SelectItem>)}
+            </SelectContent>
+          </Select>
         </div>
         <div>
           <Label>ตำแหน่ง (ว่าง = ทุกตำแหน่ง)</Label>
-          <Input value={position} onChange={(e) => setPosition(e.target.value)} />
+          <Select value={position} onValueChange={setPosition}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ANY}>(ทุกตำแหน่ง)</SelectItem>
+              {attributeValues.position.map((v) => <SelectItem key={v} value={v}>{v}</SelectItem>)}
+            </SelectContent>
+          </Select>
         </div>
         <div>
           <Label>ระดับ (ว่าง = ทุกระดับ)</Label>
-          <Input value={jobLevel} onChange={(e) => setJobLevel(e.target.value)} />
+          <Select value={jobLevel} onValueChange={setJobLevel}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ANY}>(ทุกระดับ)</SelectItem>
+              {attributeValues.job_level.map((v) => <SelectItem key={v} value={v}>{v}</SelectItem>)}
+            </SelectContent>
+          </Select>
         </div>
         <Button onClick={submit} disabled={busy} className="col-span-2 sm:col-span-4 w-fit">
           {busy ? "กำลังบันทึก..." : "➕ เพิ่มกฎ"}

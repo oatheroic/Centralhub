@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card } from "@/components/ui/card";
 import {
@@ -25,6 +24,30 @@ import { ROLE_LABEL, type AppRole } from "@/lib/auth-utils";
 //     departments.id) — lives entirely in engineering-db, managed
 //     straight through this app's own PostgREST, no auth-gateway route.
 const APP_ID = "engineering";
+
+// Wildcard sentinel — Radix Select can't use an empty string as an item
+// value, so "any value for this criterion" (the existing NULL-column
+// meaning, see auth-gateway's resolveRoleCode()) is represented by this
+// string on the wire and translated to null right before POST.
+const ANY = "__any__";
+
+type AttributeKind = "department" | "position" | "job_level";
+
+function useAttributeValues() {
+  const [values, setValues] = useState<Record<AttributeKind, string[]>>({
+    department: [],
+    position: [],
+    job_level: [],
+  });
+  useEffect(() => {
+    (["department", "position", "job_level"] as const).forEach((kind) => {
+      fetch(`/auth/admin/attribute-values/${kind}`, { credentials: "same-origin" })
+        .then((res) => (res.ok ? (res.json() as Promise<string[]>) : []))
+        .then((vals) => setValues((prev) => ({ ...prev, [kind]: vals })));
+    });
+  }, []);
+  return values;
+}
 
 type Rule = {
   id: number;
@@ -55,10 +78,11 @@ export default function RoleRulesPanel() {
 function RulesSection() {
   const [rules, setRules] = useState<Rule[]>([]);
   const [roleCode, setRoleCode] = useState<AppRole>("reporter");
-  const [department, setDepartment] = useState("");
-  const [position, setPosition] = useState("");
-  const [jobLevel, setJobLevel] = useState("");
+  const [department, setDepartment] = useState(ANY);
+  const [position, setPosition] = useState(ANY);
+  const [jobLevel, setJobLevel] = useState(ANY);
   const [busy, setBusy] = useState(false);
+  const attributeValues = useAttributeValues();
 
   async function load() {
     const res = await fetch(`/auth/admin/apps/${APP_ID}/role-rules`, { credentials: "same-origin" });
@@ -75,13 +99,13 @@ function RulesSection() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           roleCode,
-          department: department.trim() || null,
-          position: position.trim() || null,
-          jobLevel: jobLevel.trim() || null,
+          department: department === ANY ? null : department,
+          position: position === ANY ? null : position,
+          jobLevel: jobLevel === ANY ? null : jobLevel,
         }),
       });
       if (!res.ok) throw new Error(`${res.status}`);
-      setDepartment(""); setPosition(""); setJobLevel("");
+      setDepartment(ANY); setPosition(ANY); setJobLevel(ANY);
       toast.success("เพิ่มกฎสำเร็จ");
       load();
     } catch (err) {
@@ -155,15 +179,33 @@ function RulesSection() {
         </div>
         <div>
           <Label>แผนก (ว่าง = ทุกแผนก)</Label>
-          <Input value={department} onChange={(e) => setDepartment(e.target.value)} />
+          <Select value={department} onValueChange={setDepartment}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ANY}>(ทุกแผนก)</SelectItem>
+              {attributeValues.department.map((v) => <SelectItem key={v} value={v}>{v}</SelectItem>)}
+            </SelectContent>
+          </Select>
         </div>
         <div>
           <Label>ตำแหน่ง (ว่าง = ทุกตำแหน่ง)</Label>
-          <Input value={position} onChange={(e) => setPosition(e.target.value)} />
+          <Select value={position} onValueChange={setPosition}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ANY}>(ทุกตำแหน่ง)</SelectItem>
+              {attributeValues.position.map((v) => <SelectItem key={v} value={v}>{v}</SelectItem>)}
+            </SelectContent>
+          </Select>
         </div>
         <div>
           <Label>ระดับ (ว่าง = ทุกระดับ)</Label>
-          <Input value={jobLevel} onChange={(e) => setJobLevel(e.target.value)} />
+          <Select value={jobLevel} onValueChange={setJobLevel}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ANY}>(ทุกระดับ)</SelectItem>
+              {attributeValues.job_level.map((v) => <SelectItem key={v} value={v}>{v}</SelectItem>)}
+            </SelectContent>
+          </Select>
         </div>
         <Button onClick={submit} disabled={busy} className="col-span-2 sm:col-span-4 w-fit">
           {busy ? "กำลังบันทึก..." : "➕ เพิ่มกฎ"}
@@ -317,6 +359,7 @@ function DeptAliasSection() {
   const [centralhubDept, setCentralhubDept] = useState("");
   const [deptId, setDeptId] = useState("");
   const [busy, setBusy] = useState(false);
+  const attributeValues = useAttributeValues();
 
   async function load() {
     const [{ data: a }, { data: d }] = await Promise.all([
@@ -389,7 +432,12 @@ function DeptAliasSection() {
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end border-t pt-4">
         <div>
           <Label>แผนก CentralHub *</Label>
-          <Input value={centralhubDept} onChange={(e) => setCentralhubDept(e.target.value)} placeholder="เช่น Purchasing" />
+          <Select value={centralhubDept} onValueChange={setCentralhubDept}>
+            <SelectTrigger><SelectValue placeholder="เลือกแผนก" /></SelectTrigger>
+            <SelectContent>
+              {attributeValues.department.map((v) => <SelectItem key={v} value={v}>{v}</SelectItem>)}
+            </SelectContent>
+          </Select>
         </div>
         <div>
           <Label>แผนกในระบบนี้ *</Label>

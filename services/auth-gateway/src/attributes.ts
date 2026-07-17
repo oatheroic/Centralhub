@@ -94,6 +94,84 @@ export async function addAttributeValue(kind: AttributeKind, value: string): Pro
   );
 }
 
+// user_attributes' and app_role_rules' columns are named identically to
+// AttributeKind ("department" | "position" | "job_level"), so this is a
+// literal passthrough today — kept as a function (not inlined) so a future
+// naming divergence has one place to fix instead of four call sites.
+function attributeColumn(kind: AttributeKind): string {
+  return kind;
+}
+
+export type AttributeValueUsage = { userAttributes: number; roleRules: number };
+
+export async function countAttributeValueUsage(kind: AttributeKind, value: string): Promise<AttributeValueUsage> {
+  const column = attributeColumn(kind);
+  const [userAttrs, roleRules] = await Promise.all([
+    pool.query<{ count: string }>(`SELECT COUNT(*) FROM user_attributes WHERE ${column} = $1`, [value]),
+    pool.query<{ count: string }>(`SELECT COUNT(*) FROM app_role_rules WHERE ${column} = $1`, [value]),
+  ]);
+  return {
+    userAttributes: Number(userAttrs.rows[0].count),
+    roleRules: Number(roleRules.rows[0].count),
+  };
+}
+
+export class AttributeValueInUseError extends Error {
+  constructor(public readonly usage: AttributeValueUsage) {
+    super("attribute value is still in use");
+  }
+}
+
+// Blocks deleting a value still referenced by a real user or role rule —
+// unlike the seed-list gap noted above (an unlisted value just displays as
+// "(unlisted)"), an admin-initiated delete of something actively in use
+// would be a silent, confusing loss of that reference's readability with
+// no recovery path.
+export async function deleteAttributeValue(kind: AttributeKind, value: string): Promise<void> {
+  const usage = await countAttributeValueUsage(kind, value);
+  if (usage.userAttributes > 0 || usage.roleRules > 0) {
+    throw new AttributeValueInUseError(usage);
+  }
+  await pool.query("DELETE FROM attribute_values WHERE kind = $1 AND value = $2", [kind, value]);
+}
+
+export class AttributeValueExistsError extends Error {
+  constructor() {
+    super("a value with that name already exists");
+  }
+}
+
+// Renames a value in place and cascades the change to every existing
+// reference, so a correction (fixing a typo, updating outdated corporate
+// terminology) doesn't leave user_attributes/app_role_rules pointing at a
+// name that no longer appears in the managed list — unlike delete, a
+// rename has an unambiguous "what should happen to existing rows" answer.
+export async function renameAttributeValue(kind: AttributeKind, oldValue: string, newValue: string): Promise<void> {
+  const column = attributeColumn(kind);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const updated = await client.query(
+      "UPDATE attribute_values SET value = $1 WHERE kind = $2 AND value = $3",
+      [newValue, kind, oldValue],
+    );
+    if (updated.rowCount === 0) {
+      throw new Error(`no ${kind} value "${oldValue}" found`);
+    }
+    await client.query(`UPDATE user_attributes SET ${column} = $1 WHERE ${column} = $2`, [newValue, oldValue]);
+    await client.query(`UPDATE app_role_rules SET ${column} = $1 WHERE ${column} = $2`, [newValue, oldValue]);
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    if ((err as { code?: string }).code === "23505") {
+      throw new AttributeValueExistsError();
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 export type AppRoleRule = {
   id: number;
   appId: string;

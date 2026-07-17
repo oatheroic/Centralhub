@@ -708,9 +708,45 @@ first- vs. third-party by fiat**.
   screen needed. Existing free-text values not in the seed list (there are none
   today, since the seed list includes exactly what `seedDevAttributes()`
   assigns dev-admin/dev-user) still display correctly as an extra
-  "(unlisted)" option rather than being silently dropped. No delete
-  endpoint — removing a value an existing user is already assigned would
-  just make their attribute look unlisted with no real cleanup benefit.
+  "(unlisted)" option rather than being silently dropped.
+- **Full CRUD, and the same list reused everywhere a CentralHub department/
+  position/job level gets typed** (closes the rest of the "official list"
+  gap — the paragraph above only covered Create/Read):
+  - `PUT`/`DELETE /admin/attribute-values/:kind/:value`
+    (`routes/adminAttributeValues.ts`, `renameAttributeValue()`/
+    `deleteAttributeValue()` in `attributes.ts`). Rename is transactional and
+    cascades to every existing `user_attributes` and `app_role_rules` row
+    referencing the old value, so a correction (fixing a typo, updating
+    outdated terminology) never leaves a reference pointing at a name that's
+    no longer in the list. Delete is blocked (`409`, with the blocking
+    counts in the response body) while any `user_attributes` or
+    `app_role_rules` row still references the value — unlike a value simply
+    missing from the seed list, an *admin-initiated* delete of something
+    genuinely in use would be a silent, confusing loss with no recovery
+    path, so this one case is enforced server-side rather than left to
+    "(unlisted)" display fallback. `apps/admin`'s Users panel gained a
+    "Manage" link on each of the three column headers
+    (`AttributeValueManagerDialog.tsx`) — inline rename and delete per
+    value, surfacing the `409` blocking reason directly.
+  - `POST /admin/apps/:appId/role-rules` (`adminRoleRules.ts`) now validates
+    any non-null `department`/`position`/`jobLevel` criterion against this
+    same list before creating a rule, closing the exact "silent typo never
+    matches any real user" failure mode this section already fixed for
+    `user_attributes` — `resolveRoleCode()` does an exact string compare, so
+    an unlisted value in a rule was previously accepted and simply never
+    matched anyone. Not retroactive: rows written before this validation
+    existed aren't re-checked.
+  - `apps/assets` and `apps/engineering`'s own "Role Rules" admin panels
+    (`RoleRulesPanel.tsx`) — previously free-text `<Input>`s for
+    department/position/job level when defining an `app_role_rules` row —
+    are now `Select`s sourced from the same `GET
+    /auth/admin/attribute-values/:kind` list (a blank/"any" choice is a
+    sentinel value translated to `null`, preserving the existing wildcard
+    meaning). `apps/engineering`'s `DeptAliasSection` (CentralHub department
+    → this app's own `departments.id`) also converted its CentralHub-side
+    picker the same way — the alias *target* (this app's own department
+    row) is unaffected, only the CentralHub-side value is now constrained
+    to the managed list.
 - **Verified**: a request with no token gets `401`; a valid session with
   `read: false` gets `[]` (RLS filters every row); `read: true` returns real
   seeded data; `write: false` attempting an `INSERT` gets `403` even though
@@ -1235,6 +1271,7 @@ specific to `apps/engineering` (§10b), then everything else.
 | Production-safe credentials | `keycloak/realm-export.json`, `.env` | `dev-admin`/`dev-user`/client secret are dev-only seed data — see §6, §7 |
 | `usePermissions.ts`'s `window.alert()` → toast | `apps/_template`, `apps/marketing`, `apps/finance` | Duplicated across 3 files by design (§9); a real fix needs extracting the hook into `packages/ui` first, out of scope for §9's UI-primitives pass |
 | Postgres-backed dynamic app registry | replacing `apps.ts`/`KNOWN_APPS`/`docker-compose.yml`'s static lists | Deferred per §10 — not a prerequisite for onboarding one real third-party app |
+| Replace app-local department vocabularies with CentralHub's official `attribute_values` list directly, retiring alias/mapping tables | `apps/engineering`'s own `departments` table (and `DeptAliasSection`'s mapping into it); the equivalent for `apps/assets`'s department-shaped demo data (`cc_recipient`/`recipient`) | `apps/engineering`'s `departments` is a real FK'd entity (machines, repair jobs, profiles reference `department_id`), so collapsing it onto `attribute_values` means either migrating those FKs to reference names directly or a synced mirror table — materially larger than the CRUD/dropdown work above, which only touched the CentralHub-side picker, not each app's own department model |
 
 ---
 
@@ -1269,7 +1306,7 @@ pnpm stack:up
 
 ---
 
-## 16. Automated end-to-end test (`scripts/test-stack.mjs`)
+## 15. Automated end-to-end test (`scripts/test-stack.mjs`)
 
 - **Objective**: a single command that exercises every pillar above against
   a real running stack — no mocks, no headless browser dependency — so a
@@ -1325,64 +1362,71 @@ pnpm stack:up
 
 ---
 
-## 15. Session handoff notes
+## 16. Session handoff notes
 
 For whoever (human or agent) picks this repo up next — what changed most
 recently, and where to look first.
 
-**What just happened**: `apps/assets`' migration pipeline was rewritten
-clean, closing all 5 rows in §13's `apps/assets`-specific deferred table.
-The 32 exported Lovable migrations plus the hand-authored
-`20260707000000_centralhub_rls.sql` rewrite (33 files total, applied as
-literal history since the original ingestion) were replaced by 3 clean,
-idempotent files at `apps/assets/db/migrations/`
-(`20260707000000_schema.sql`, `20260707000001_rls.sql`,
-`20260707000002_storage.sql`), mirroring `apps/engineering/db/migrations/`
-exactly — same end-state schema/RLS/seed data, verified column-for-column
-against all 33 original files by reading them directly (not summarized).
-`apps/assets/scripts/migrate.sh` was simplified to match
-`apps/engineering/scripts/migrate.sh`'s shape: the fragile `grep -v`
-storage-statement line filter and the `ALREADY_MIGRATED` guard are both
-gone (unnecessary once every statement is idempotent), and it gained the
-`NOTIFY pgrst, 'reload schema'` call `apps/engineering` already had but
-`apps/assets` was missing — a latent PostgREST schema-cache race, closed
-while aligning the two. `apps/assets/supabase/` was renamed to
-`apps/assets/db/` and the dead `config.toml` (unused hosted-project
-pointer) deleted, matching `apps/engineering`'s own prior cleanup. Two
-stale `.../supabase/migrations/...` comments in
-`environments/docker-compose.yml` (one for each app; engineering's own
-comment was already stale from its own earlier rename) were fixed as a
-drive-by. §10's own historical write-up was left untouched per this
-repo's "record what actually happened" convention, with a pointer note
-added directing a reader to the new `db/migrations/` location. See §10's
-new closing note and §13 for the full before/after.
+**What just happened**: the "official department/position/job level list"
+work described in §10's "Full CRUD, and the same list reused everywhere"
+bullet — closing the gap between the Create/Read-only `attribute_values`
+table from an earlier session and an actual "official list, CRUD by admin,
+every app's role mapping reads from it" feature. Three pieces:
 
-**Known-open items** — see §13's tables. The two remaining
-`apps/assets`-specific rows (storage-admin service-key gap, workflow-role
-login retirement) were re-investigated this session, not just carried
-forward: both confirmed still accurate and genuinely not actionable without
-either nothing-to-fix (storage admin) or a product decision (workflow-role
-login) — see §13 for the updated wording. Nothing else in §13 changed.
+1. **Full CRUD on `attribute_values`**: `services/auth-gateway/src/attributes.ts`
+   gained `renameAttributeValue()` (transactional, cascades to every
+   `user_attributes`/`app_role_rules` row referencing the old value) and
+   `deleteAttributeValue()` (blocked via `AttributeValueInUseError` while
+   still referenced). New `PUT`/`DELETE /admin/attribute-values/:kind/:value`
+   routes (`adminAttributeValues.ts`), both audited. `apps/admin`'s Users
+   panel gained a "Manage" link per column header opening
+   `AttributeValueManagerDialog.tsx` — inline rename/delete, surfacing the
+   409 in-use reason directly.
+2. **Role-rule mapping now reads from the same list instead of free text**:
+   `POST /admin/apps/:appId/role-rules` (`adminRoleRules.ts`) validates any
+   non-null department/position/jobLevel against `attribute_values` before
+   creating a rule — the same "silent typo never matches anyone" bug class
+   §10 had already fixed for `user_attributes`, left open here until now.
+   `apps/assets` and `apps/engineering`'s own `RoleRulesPanel.tsx` (their
+   "Role Rules" admin tab) had their free-text department/position/jobLevel
+   `<Input>`s replaced with `Select`s sourced from the same
+   `GET /auth/admin/attribute-values/:kind` list (a sentinel `"__any__"`
+   value preserves the existing wildcard meaning). `apps/engineering`'s
+   `DeptAliasSection` got the same treatment for its CentralHub-side
+   department picker.
+3. **`apps/assets`'s local role_code field was also still free text** —
+   caught in a follow-up round after the first pass: the "Role code" input
+   in its `RoleRulesPanel.tsx` (`ADM01`, `PUR01`, ...) let an admin type
+   anything. Converted to a `Select` sourced from that app's own
+   `role_assignments` table (the same table `PasswordManagerPanel.tsx`
+   already manages), fetched via the app's own PostgREST client rather than
+   an auth-gateway route, since this vocabulary lives in `assets-db`, not
+   CentralHub's Postgres.
 
-**Verification approach this session**: read all 33 original migration
-files directly (not just a summary) before writing the replacements, to
-guarantee the rewrite is byte-accurate to the exported end state, not just
-"looks right." Then verified against the real running stack: rebuilt
-`assets-migrate`'s image and ran it twice against the existing (already
-years-old-by-container-standards, already-migrated) `assets-db` volume —
-both runs exited 0, confirming restart-idempotency now that the
-`ALREADY_MIGRATED` guard is gone. Queried the live database directly
-afterward to confirm the schema matches exactly: 90 columns on
-`asset_purchase_requests`, 17 functions, 24 public-schema RLS policies (6
-tables × 4 verbs) + 4 storage policies, 6 seeded `role_assignments` rows,
-8 seeded `cc_recipient` dropdown rows. Ran the full `pnpm test:stack`
-suite (75 assertions) clean, including the `apps/assets` RLS-boundary
-checks (§16) that exercise the rewritten policies end-to-end. A true
-fresh-volume test (wiping `centralhub_assets_pgdata` entirely) was
-considered but not run — the restart-against-already-migrated-volume test
-above is the more realistic scenario given this repo's own
-volume-persistence convention (see the "Temporary exception" note below),
-and the schema/function/policy counts already confirm no drift.
+§13's general deferred table gained one new forward-looking row: replacing
+app-local department vocabularies (e.g. `apps/engineering`'s own
+`departments` table) with the official list directly, retiring alias
+tables — scoped as materially larger (real FK'd entities), not started.
+
+**Known-open items** — see §13's tables; nothing else changed this session.
+
+**Verification approach this session**: extended `scripts/test-stack.mjs`
+with 8 new assertions (add/rename/delete round-trip on an attribute value,
+a blocked delete on an in-use value with the usage counts asserted, and a
+rejected role-rule POST for an unlisted department) — full suite passes
+83/83 against the live stack. Rebuilt and redeployed `auth-gateway`,
+`app-admin`, `app-assets`, `app-engineering`; confirmed the actual shipped
+JS bundles (not just local source) contain the new dropdown/dialog markup,
+since a container rebuild without a redeploy would otherwise look
+identical from source alone. One non-code finding while re-verifying: a
+manual UI testing pass had left `dev-user`'s department attribute changed
+away from its seeded "Purchasing" value, which cascaded into the demo
+ADM01/REQ01 role_code assertions failing — not a regression, just seed
+drift from interactive testing. Restarting `auth-gateway` (its boot-time
+`seedDevAttributes()` upserts, so it self-heals) restored the canonical
+demo state and the suite went back to green — worth knowing if the demo
+accounts' resolved roles ever look wrong after poking at the attribute
+editor by hand.
 
 **Git/environment state as of this handoff**: all of the above is staged
 for a commit alongside this README update (see the commit this paragraph
@@ -1396,7 +1440,7 @@ place across sessions) is still in effect as of this handoff.
 and the stack's Docker volumes (`centralhub_pgdata`, `centralhub_assets_pgdata`,
 `centralhub_assets_storage`) are being left in place across sessions instead of
 being torn down, so `pnpm stack:up`/`down` don't repeatedly rebuild Postgres and
-re-run every migration from empty volumes while §16's test script and other
+re-run every migration from empty volumes while §15's test script and other
 day-to-day work are still iterating. This is scaffolding-phase convenience, not
 a policy change — revert to the delete-`.env`-each-session convention (§3/§5)
 once the stack stabilizes, and definitely before any real/shared deployment.

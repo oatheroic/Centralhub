@@ -1,6 +1,6 @@
 import { Router, type Response } from "express";
 import { requireSession, requireAdmin, type AuthedRequest } from "../middleware/requireAdmin.js";
-import { listAppRoleRules, createAppRoleRule, deleteAppRoleRule } from "../attributes.js";
+import { listAppRoleRules, createAppRoleRule, deleteAppRoleRule, listAttributeValues } from "../attributes.js";
 import { KNOWN_APPS } from "../permissions.js";
 import { recordAudit } from "../audit.js";
 
@@ -49,12 +49,31 @@ adminRoleRulesRouter.post(
       res.status(400).json({ error: "roleCode is required" });
       return;
     }
+    const criteria = {
+      department: department?.trim() || null,
+      position: position?.trim() || null,
+      jobLevel: jobLevel?.trim() || null,
+    };
     try {
-      const rule = await createAppRoleRule(appId, roleCode, {
-        department: department?.trim() || null,
-        position: position?.trim() || null,
-        jobLevel: jobLevel?.trim() || null,
-      });
+      // Every non-wildcard criterion must be a value from the managed
+      // list — otherwise a typo here silently never matches any real user
+      // (attrs.ts's resolveRoleCode does an exact string compare), the
+      // same class of bug §10's "Managed attribute values" work already
+      // closed for user_attributes itself.
+      const checks: [string, string | null, "department" | "position" | "job_level"][] = [
+        ["department", criteria.department, "department"],
+        ["position", criteria.position, "position"],
+        ["jobLevel", criteria.jobLevel, "job_level"],
+      ];
+      for (const [field, value, kind] of checks) {
+        if (value === null) continue;
+        const allowed = await listAttributeValues(kind);
+        if (!allowed.includes(value)) {
+          res.status(400).json({ error: `${field} "${value}" is not in the managed ${kind} list` });
+          return;
+        }
+      }
+      const rule = await createAppRoleRule(appId, roleCode, criteria);
       void recordAudit({
         actor: { sub: req.session?.sub ?? null, name: req.session?.name ?? "unknown" },
         action: "role_rule.create",
