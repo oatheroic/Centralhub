@@ -13,16 +13,28 @@ import { ROLE_LABEL, type AppRole } from "@/lib/auth-utils";
 // Only reachable from AdminPage, itself only shown to a resolved role_code
 // of "admin" (see App.tsx) — no separate admin check needed here.
 //
-// Three independent mapping tables, none of which touches a CentralHub
-// user's own attributes or requires per-user editing on the CentralHub
-// side (README's engineering ingestion section):
+// Role resolution and department resolution are two separate chains, each
+// mirroring the same "bulk rule + per-user exception" shape:
 //  1. Role rules (attributes -> role_code) — auth-gateway, generic, same
 //     table/endpoints apps/assets already uses.
 //  2. Role overrides (named user -> role_code exception) — auth-gateway,
 //     generic, checked before rules by resolveRoleCode().
-//  3. Department aliases (CentralHub department string -> this app's own
-//     departments.id) — lives entirely in engineering-db, managed
+//  3. Department overrides (named user -> this app's own departments.id
+//     exception) — lives entirely in engineering-db, checked before the
+//     alias lookup by current_dept(). The direct per-user analog to #4,
+//     for users whose CentralHub department attribute has no real
+//     equivalent in this app's own vocabulary (or is unset/mistyped).
+//  4. Department aliases (CentralHub department string -> this app's own
+//     departments.id, bulk) — lives entirely in engineering-db, managed
 //     straight through this app's own PostgREST, no auth-gateway route.
+// Department resolution (#3/#4) is deliberately independent of role
+// resolution (#1/#2) — profiles.department_id is relied on by every role
+// (reporter's visible machine types, repairer's parts-requisition default,
+// leader's job inbox, department_head's parts_requisitions RLS), not just
+// leader, so it can't be folded into a role-specific override.
+// A diagnostics section at the bottom surfaces the resolved role_code +
+// department for a given user, so a mismatch between these chains is
+// visible directly instead of only manifesting as a blank page in the app.
 const APP_ID = "engineering";
 
 // Wildcard sentinel — Radix Select can't use an empty string as an item
@@ -62,6 +74,7 @@ type Override = { id: number; appId: string; userSub: string; roleCode: string }
 type KeycloakUser = { id: string; name: string; email: string };
 type Dept = { id: string; name: string };
 type Alias = { id: number; centralhub_department: string; department_id: string };
+type DeptOverride = { id: number; user_sub: string; department_id: string };
 
 const ROLE_OPTIONS: AppRole[] = ["admin", "leader", "department_head", "repairer", "reporter"];
 
@@ -70,7 +83,9 @@ export default function RoleRulesPanel() {
     <div className="space-y-4">
       <RulesSection />
       <OverridesSection />
+      <DeptOverridesSection />
       <DeptAliasSection />
+      <DiagnosticsSection />
     </div>
   );
 }
@@ -349,6 +364,122 @@ function OverridesSection() {
   );
 }
 
+// Per-user department override — restores the original app's direct
+// admin-assigned profiles.department_id workflow, checked BEFORE
+// department_aliases below (see current_dept() in the
+// 20260717000000_dept_user_overrides migration). Independent of role_code
+// assignment above; a leader still needs a role_code from
+// RulesSection/OverridesSection — this only fixes which department they see.
+function DeptOverridesSection() {
+  const [overrides, setOverrides] = useState<DeptOverride[]>([]);
+  const [users, setUsers] = useState<KeycloakUser[]>([]);
+  const [depts, setDepts] = useState<Dept[]>([]);
+  const [userSub, setUserSub] = useState("");
+  const [deptId, setDeptId] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function load() {
+    const [{ data: o }, { data: d }, uRes] = await Promise.all([
+      supabase.from("department_user_overrides").select("id, user_sub, department_id").order("id"),
+      supabase.from("departments").select("id, name").order("name"),
+      fetch("/auth/admin/users", { credentials: "same-origin" }),
+    ]);
+    setOverrides((o ?? []) as DeptOverride[]);
+    setDepts((d ?? []) as Dept[]);
+    if (uRes.ok) setUsers((await uRes.json()) as KeycloakUser[]);
+  }
+  useEffect(() => { load(); }, []);
+
+  function userLabel(sub: string): string {
+    const u = users.find((x) => x.id === sub);
+    return u ? `${u.name} (${u.email})` : sub;
+  }
+
+  async function submit() {
+    if (!userSub || !deptId) { toast.error("กรอกข้อมูลให้ครบ"); return; }
+    setBusy(true);
+    try {
+      const { error } = await supabase.from("department_user_overrides").upsert(
+        { user_sub: userSub, department_id: deptId },
+        { onConflict: "user_sub" },
+      );
+      if (error) throw error;
+      toast.success("บันทึกแล้ว");
+      setUserSub(""); setDeptId("");
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "ผิดพลาด");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(id: number) {
+    const { error } = await supabase.from("department_user_overrides").delete().eq("id", id);
+    if (error) toast.error(error.message); else await load();
+  }
+
+  return (
+    <Card className="p-6 space-y-4">
+      <div>
+        <h2 className="text-lg font-bold">🧭 กำหนดแผนกรายบุคคล (ข้อยกเว้น)</h2>
+        <p className="text-sm text-muted-foreground mt-1">
+          กำหนดแผนก/สังกัดในระบบนี้ให้ผู้ใช้เฉพาะราย — มีผลเหนือ "จับคู่แผนก CentralHub" ด้านล่างเสมอ
+          ใช้เมื่อแผนกของผู้ใช้ใน CentralHub ไม่มีคู่ที่ตรงกัน (ไม่มีค่าตั้งไว้ หรือสะกดไม่ตรง)
+        </p>
+      </div>
+      <div className="overflow-x-auto border rounded-lg">
+        <table className="w-full text-sm">
+          <thead className="bg-muted/50">
+            <tr className="text-left">
+              <th className="p-2">ผู้ใช้งาน</th>
+              <th className="p-2">แผนกในระบบนี้</th>
+              <th className="p-2 text-right">การดำเนินการ</th>
+            </tr>
+          </thead>
+          <tbody>
+            {overrides.map((o) => (
+              <tr key={o.id} className="border-t">
+                <td className="p-2">{userLabel(o.user_sub)}</td>
+                <td className="p-2">{depts.find((d) => d.id === o.department_id)?.name ?? "-"}</td>
+                <td className="p-2 text-right">
+                  <Button size="sm" variant="destructive" onClick={() => remove(o.id)}>🗑️</Button>
+                </td>
+              </tr>
+            ))}
+            {overrides.length === 0 && (
+              <tr><td colSpan={3} className="p-4 text-center text-muted-foreground">ยังไม่มีข้อยกเว้น</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end border-t pt-4">
+        <div>
+          <Label>ผู้ใช้งาน *</Label>
+          <Select value={userSub} onValueChange={setUserSub}>
+            <SelectTrigger><SelectValue placeholder="เลือกผู้ใช้งาน" /></SelectTrigger>
+            <SelectContent>
+              {users.map((u) => <SelectItem key={u.id} value={u.id}>{u.name} ({u.email})</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </div>
+        <div>
+          <Label>แผนกในระบบนี้ *</Label>
+          <Select value={deptId} onValueChange={setDeptId}>
+            <SelectTrigger><SelectValue placeholder="เลือกแผนก" /></SelectTrigger>
+            <SelectContent>
+              {depts.map((d) => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </div>
+        <Button onClick={submit} disabled={busy} className="w-fit">
+          {busy ? "กำลังบันทึก..." : "➕ กำหนดแผนก"}
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
 // Lives entirely in engineering-db (department_aliases table, see the
 // centralhub_rls migration) — managed straight through this app's own
 // PostgREST, not an auth-gateway route, since this mapping has nothing to
@@ -452,6 +583,105 @@ function DeptAliasSection() {
           {busy ? "กำลังบันทึก..." : "➕ จับคู่"}
         </Button>
       </div>
+    </Card>
+  );
+}
+
+// Resolved-identity diagnostics — surfaces exactly the failure mode this app
+// used to hide: role_code and department are resolved by independent
+// mechanisms (auth-gateway rules/overrides vs. this app's own department
+// overrides/aliases); a mismatch used to manifest only as LeaderPage.tsx's
+// silent blank page. Lets an admin check what a user WOULD get before they
+// even log in.
+function DiagnosticsSection() {
+  const [users, setUsers] = useState<KeycloakUser[]>([]);
+  const [depts, setDepts] = useState<Dept[]>([]);
+  const [aliases, setAliases] = useState<Alias[]>([]);
+  const [deptOverrides, setDeptOverrides] = useState<DeptOverride[]>([]);
+  const [userSub, setUserSub] = useState("");
+  const [roleCode, setRoleCode] = useState<string | null>(null);
+  const [deptName, setDeptName] = useState<string | null>(null);
+  const [checked, setChecked] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    Promise.all([
+      fetch("/auth/admin/users", { credentials: "same-origin" }).then((r) => (r.ok ? r.json() : [])),
+      supabase.from("departments").select("id, name").order("name"),
+      supabase.from("department_aliases").select("id, centralhub_department, department_id"),
+      supabase.from("department_user_overrides").select("id, user_sub, department_id"),
+    ]).then(([u, { data: d }, { data: a }, { data: o }]) => {
+      setUsers(u as KeycloakUser[]);
+      setDepts((d ?? []) as Dept[]);
+      setAliases((a ?? []) as Alias[]);
+      setDeptOverrides((o ?? []) as DeptOverride[]);
+    });
+  }, []);
+
+  async function check() {
+    if (!userSub) { toast.error("กรุณาเลือกผู้ใช้งาน"); return; }
+    setBusy(true);
+    try {
+      const [roleRes, attrRes] = await Promise.all([
+        fetch(`/auth/admin/apps/${APP_ID}/resolve-role/${userSub}`, { credentials: "same-origin" }),
+        fetch(`/auth/admin/users/${userSub}/attributes`, { credentials: "same-origin" }),
+      ]);
+      const role = roleRes.ok ? (await roleRes.json() as { roleCode: string | null }) : { roleCode: null };
+      const attrs = attrRes.ok ? (await attrRes.json() as { department: string | null } | null) : null;
+      setRoleCode(role.roleCode);
+      setDeptName(attrs?.department ?? null);
+      setChecked(true);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "ตรวจสอบไม่สำเร็จ");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const override = deptOverrides.find((o) => o.user_sub === userSub);
+  const alias = !override && deptName ? aliases.find((a) => a.centralhub_department === deptName) : undefined;
+  const resolvedDeptId = override?.department_id ?? alias?.department_id ?? null;
+  const resolvedDeptName = resolvedDeptId ? depts.find((d) => d.id === resolvedDeptId)?.name ?? null : null;
+  const source = override ? "ข้อยกเว้นรายบุคคล" : alias ? "จับคู่แผนก (ทั่วไป)" : "ไม่พบ";
+  const needsDept = roleCode === "leader" || roleCode === "department_head";
+  const broken = needsDept && !resolvedDeptId;
+
+  return (
+    <Card className="p-6 space-y-4">
+      <div>
+        <h2 className="text-lg font-bold">🔍 ตรวจสอบสิทธิ์ที่แปลผลแล้ว (การวินิจฉัย)</h2>
+        <p className="text-sm text-muted-foreground mt-1">
+          ตรวจสอบว่าผู้ใช้รายหนึ่งจะได้รับบทบาทและแผนกใดจริง ๆ — ช่วยพบข้อผิดพลาดก่อนหน้าจอ "หัวหน้าสังกัด" ว่างเปล่า
+        </p>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+        <div className="sm:col-span-2">
+          <Label>ผู้ใช้งาน</Label>
+          <Select value={userSub} onValueChange={(v) => { setUserSub(v); setChecked(false); }}>
+            <SelectTrigger><SelectValue placeholder="เลือกผู้ใช้งาน" /></SelectTrigger>
+            <SelectContent>
+              {users.map((u) => <SelectItem key={u.id} value={u.id}>{u.name} ({u.email})</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </div>
+        <Button onClick={check} disabled={busy} className="w-fit">
+          {busy ? "กำลังตรวจสอบ..." : "ตรวจสอบ"}
+        </Button>
+      </div>
+      {checked && (
+        <div className="border rounded-lg p-4 text-sm space-y-1">
+          <div>บทบาทที่แปลผล (role_code): <b>{roleCode ?? "(ไม่พบ)"}</b></div>
+          <div>แผนก CentralHub (dept_name จาก token): <b>{deptName ?? "(ไม่มีค่า)"}</b></div>
+          <div>แหล่งที่มาของแผนกที่แปลผล: <b>{source}</b></div>
+          <div>แผนกในระบบนี้ที่แปลผลได้: <b>{resolvedDeptName ?? "(ไม่พบ)"}</b></div>
+          {broken && (
+            <div className="text-destructive font-semibold pt-2">
+              ⚠️ บทบาทนี้ต้องมีแผนก แต่แปลผลแผนกไม่สำเร็จ — หน้าหัวหน้าสังกัดของผู้ใช้รายนี้จะว่างเปล่า
+              กรุณาตั้ง "กำหนดแผนกรายบุคคล" หรือ "จับคู่แผนก CentralHub" ด้านบน
+            </div>
+          )}
+        </div>
+      )}
     </Card>
   );
 }

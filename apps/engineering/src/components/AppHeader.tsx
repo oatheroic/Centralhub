@@ -45,7 +45,7 @@ export function AppHeader({ subtitle }: { subtitle?: string }) {
             <div className="font-bold text-base leading-tight">ระบบแจ้งซ่อม</div>
             <div className="text-xs text-muted-foreground">
               {subtitle ?? (role ? ROLE_LABEL[role] : "")}
-              {profile ? ` · ${profile.full_name}${profile.code ? ` (${profile.code})` : ""}` : ""}
+              {profile ? ` · ${profile.full_name}` : ""}
             </div>
           </div>
         </div>

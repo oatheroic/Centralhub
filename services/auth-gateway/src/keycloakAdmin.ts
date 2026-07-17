@@ -1,5 +1,6 @@
 import { clientCredentialsToken } from "./oidc.js";
 import { keycloakEndpoints } from "./config.js";
+import { isKeycloakPlumbingRole } from "./roles.js";
 
 type KeycloakUser = {
   id: string;
@@ -51,7 +52,11 @@ export async function listUsers(): Promise<AdminUser[]> {
         id: user.id,
         name: [user.firstName, user.lastName].filter(Boolean).join(" ") || user.username,
         email: user.email ?? "",
-        roles: roles.map((r) => r.name),
+        // Same exclusion as syncRolesFromKeycloak (roles.ts) — this is a
+        // separate fetch straight from Keycloak's Admin API (not user_roles),
+        // so it needs its own filter, but shares the one predicate rather
+        // than duplicating the exclusion list.
+        roles: roles.map((r) => r.name).filter((r) => !isKeycloakPlumbingRole(r)),
       };
     }),
   );

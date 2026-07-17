@@ -16,6 +16,23 @@ export async function hasRole(userSub: string, role: string): Promise<boolean> {
   return (result.rowCount ?? 0) > 0;
 }
 
+// Keycloak's realm_access.roles (both from the ID token at login and from
+// the Admin API's role-mappings/realm the poller uses) always includes its
+// own plumbing roles alongside real application roles: `offline_access` and
+// `uma_authorization` are granted to every user via the realm's default
+// role, and `default-roles-<realm>` is the composite that grants both.
+// None of this repo's own role checks (hasRole(), the admin-role gate,
+// resolveRoleCode()'s guarantees) ever query for these, and this repo
+// doesn't use refresh tokens (see README §6 — deliberately not built) or
+// Keycloak's User-Managed Access/Authorization Services, so they're pure
+// noise here: no functional purpose, just clutter in user_roles, the admin
+// panel's role list, and /auth/me's roles array (which several apps display
+// directly). Filtered once, at the single choke point both call sites below
+// already share, so nothing downstream needs its own exclusion list.
+export function isKeycloakPlumbingRole(role: string): boolean {
+  return role === "offline_access" || role === "uma_authorization" || role.startsWith("default-roles-");
+}
+
 // Replace-all upsert, called right after a successful login and by the
 // background role-sync poller, so user_roles always reflects Keycloak's
 // current assignment for that user. `source` is audit-only — it labels the
@@ -24,9 +41,10 @@ export async function hasRole(userSub: string, role: string): Promise<boolean> {
 // change to.
 export async function syncRolesFromKeycloak(
   userSub: string,
-  roles: string[],
+  rawRoles: string[],
   source: "login" | "role-sync-poller" = "login",
 ): Promise<void> {
+  const roles = rawRoles.filter((r) => !isKeycloakPlumbingRole(r));
   const client = await pool.connect();
   let before: string[] = [];
   try {

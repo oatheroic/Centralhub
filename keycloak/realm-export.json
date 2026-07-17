@@ -71,6 +71,46 @@
       "realmRoles": ["user"]
     },
     {
+      "username": "dev-user2",
+      "email": "dev-user2@centralhub.local",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Dev",
+      "lastName": "User2",
+      "credentials": [{ "type": "password", "value": "devuser2123", "temporary": false }],
+      "realmRoles": ["user"]
+    },
+    {
+      "username": "dev-user3",
+      "email": "dev-user3@centralhub.local",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Dev",
+      "lastName": "User3",
+      "credentials": [{ "type": "password", "value": "devuser3123", "temporary": false }],
+      "realmRoles": ["user"]
+    },
+    {
+      "username": "dev-user4",
+      "email": "dev-user4@centralhub.local",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Dev",
+      "lastName": "User4",
+      "credentials": [{ "type": "password", "value": "devuser4123", "temporary": false }],
+      "realmRoles": ["user"]
+    },
+    {
+      "username": "dev-user5",
+      "email": "dev-user5@centralhub.local",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Dev",
+      "lastName": "User5",
+      "credentials": [{ "type": "password", "value": "devuser5123", "temporary": false }],
+      "realmRoles": ["user"]
+    },
+    {
       "username": "service-account-auth-gateway",
       "enabled": true,
       "serviceAccountClientId": "auth-gateway",

@@ -931,6 +931,55 @@ first- vs. third-party by fiat**.
     on every login from the same `department_aliases` lookup — not
     authoritative on its own (`current_dept()` is), but relied on directly
     by `parts_requisitions`'s own RLS policy and by the UI.
+  - **Found via live use, fixed in a later pass**: the bulk `dept_name` →
+    `department_aliases` chain was the *only* department-resolution path,
+    with no per-user escape hatch — if a user's CentralHub `department`
+    attribute had no matching alias row (unset, mistyped, or genuinely had
+    no equivalent in engineering's own 3-value vocabulary, ช่างผลิต/
+    ช่างบรรจุ/ช่างทั่วไป), `current_dept()` silently returned `NULL`,
+    `profiles.department_id` cached that `NULL`, and `LeaderPage.tsx`'s
+    `if (!profile?.department_id) return;` left every list empty — no
+    error, just a blank-looking หัวหน้าสังกัด (leader) landing page, with
+    no way to tell which of the two independently-configured tables
+    (auth-gateway's role rule/override vs. engineering's own alias) was
+    the actual gap. Fixed by adding a **per-user department override**,
+    `department_user_overrides` (`user_sub UUID UNIQUE, department_id`,
+    `apps/engineering/db/migrations/20260717000000_dept_user_overrides.sql`),
+    checked first in `current_dept()` before the alias fallback — the
+    direct-assignment analog to `department_aliases`, mirroring the shape
+    role resolution already has (bulk `app_role_rules` + per-user
+    `app_role_overrides`). Deliberately kept as its own general,
+    role-independent chain rather than folded into the per-user *role*
+    override: `profiles.department_id` is relied on by every role, not
+    just leader (`ReporterPage.tsx` filters visible machine types and
+    defaults a new job's department from it; `RepairerPage.tsx` defaults a
+    completed job's parts-requisition department from it;
+    `department_head`'s dormant `parts_requisitions` RLS policy is
+    department-scoped too) — bulk/ordinary users still need the generic
+    alias path to keep working. Managed from a new `DeptOverridesSection`
+    in `RoleRulesPanel.tsx`, and surfaced by a new `DiagnosticsSection` in
+    the same panel (admin picks a user, sees the resolved role_code,
+    `dept_name` claim, which mechanism supplied the department, and an
+    explicit warning if a department-scoped role resolved with no
+    department) — so this failure mode is visible directly instead of
+    only as a blank page. `LeaderPage.tsx` itself now also renders an
+    explicit "your department hasn't been set" message instead of
+    silently returning early.
+  - **A second, unrelated bug found while fixing the above**:
+    `LeaderPage.tsx`'s repairer roster query
+    (`supabase.from("user_roles").select(...)`) targeted a table that
+    doesn't exist post-ingestion — role became purely JWT-resolved (see
+    `has_role()`'s own comment in `20260716000000_schema.sql`: "there is
+    no user_roles table"), so this silently returned nothing and the
+    "assign to repairer" dropdown was always empty regardless of
+    department resolution. Since role isn't stored anywhere to query in
+    bulk, fixed with a small new auth-gateway route,
+    `GET /auth/apps/:appId/role-codes?subs=a,b,c`
+    (`services/auth-gateway/src/routes/roleLookup.ts`), gated by
+    `requireSession` only (not `requireAdmin` — a leader who isn't a
+    CentralHub realm admin still needs this), fanning out to the existing
+    `resolveRoleCode()` per requested user. `LeaderPage.tsx` now calls this
+    for its own department's candidate profiles instead of the dead table.
 - **Identity provisioning**: a new `ensure_profile()` `SECURITY DEFINER`
   Postgres RPC, called once per page load from `useAuth.tsx`, upserts the
   caller's own `profiles` row (keyed to `auth.uid()`, so a user can only
@@ -1258,6 +1307,8 @@ specific to `apps/engineering` (§10b), then everything else.
 | `allowed_repair_dept_ids` per-reporter restriction | `apps/engineering` `profiles` table | Was admin-editable-per-user in the original export but never actually read/enforced anywhere in the app even before this ingestion; dropped along with the rest of per-user admin editing rather than rebuilt as a rule |
 | Users tab's live-session/attribute view requires the CentralHub Keycloak admin realm role, not this app's resolved `role_code` | `apps/engineering/src/pages/AdminPage.tsx` (`UsersTab`) | It calls the existing `/auth/admin/users(/attributes)` bulk endpoints, which are gated by `requireAdmin` (Keycloak realm role) — coincides with engineering's own `admin` role_code today only because `CENTRALHUB_ADMIN_ROLE_CODE` makes every CentralHub admin resolve to it. A user who reached engineering's `admin` role_code purely via a rule/override (without the Keycloak realm role) would get 403s from this tab specifically, while every other admin-gated engineering feature would still work for them. Not fixed this pass — noted in code and here rather than silently left unknown |
 | `resolveLocalRole()` badge doesn't account for `CENTRALHUB_ADMIN_ROLE_CODE` | `apps/engineering/src/pages/AdminPage.tsx` (`UsersTab`) | Client-side, display-only computation reusing existing endpoints (deliberately kept simple, no new backend route — see §10b); can show a stale/absent role badge for a CentralHub admin whose actual `role_code` comes from the guarantee rather than a rule/override row. Cosmetic only — `resolveRoleCode()` server-side already resolves correctly regardless |
+| A user can only be assigned ONE department (`department_user_overrides.user_sub` is `UNIQUE`) | `apps/engineering/db/migrations/20260717000000_dept_user_overrides.sql`, `current_dept()` | Found live while testing multi-department leader scenarios: some real leaders are in charge of more than one of this app's department sub-groups (e.g. both ช่างผลิต and ช่างบรรจุ), but `current_dept()` returns a single `uuid`, `profiles.department_id` is a single FK, and every department-scoped RLS policy (`repair_jobs`, `parts_requisitions`) compares against that one value. Supporting this is a real, non-trivial change — `current_dept()` would need to become a set-returning function or every department-scoped policy would need an `IN`/`ANY` comparison against a multi-row per-user department list, and `LeaderPage.tsx`'s "my department's jobs" query would need to union across all of a leader's departments instead of `.eq()` on one. Not started |
+| Parts-requisition delete (`PartsRequisitionTab.tsx`) still uses a raw `confirm()` and isn't audited | `apps/engineering/src/components/PartsRequisitionTab.tsx` | Same class of gap the job-delete/assign audit work (§10b, this session) closed for `repair_jobs` — noticed while touching this file to remove the vestigial `(code)` display, but left alone to keep that session's scope to what was actually asked (job deletion/assignment, not every delete button in the app) |
 
 **General**:
 
@@ -1353,9 +1404,10 @@ pnpm stack:up
   request-per-request assertion style; verify it by hand (change a role in
   Keycloak's console, wait out the interval, confirm the next request
   reflects it without a force-logout).
-- **Status**: done — 75 assertions (extended this session with §10b's
-  `apps/engineering` coverage), verified to pass cleanly against a fresh
-  stack and to fail with an accurate diagnostic when a permission row is
+- **Status**: done — 91 assertions (extended this session with
+  `department_user_overrides` and the `resolve-role`/`role-codes` lookups,
+  see §16), verified to pass cleanly against a live rebuilt stack (91/91)
+  and to fail with an accurate diagnostic when a permission row is
   corrupted by hand (tested by both routes: flipping the DB row directly,
   and confirming the script's own "granted" checks catch a false-200 from
   the Nginx gotcha above).
@@ -1367,66 +1419,187 @@ pnpm stack:up
 For whoever (human or agent) picks this repo up next — what changed most
 recently, and where to look first.
 
-**What just happened**: the "official department/position/job level list"
-work described in §10's "Full CRUD, and the same list reused everywhere"
-bullet — closing the gap between the Create/Read-only `attribute_values`
-table from an earlier session and an actual "official list, CRUD by admin,
-every app's role mapping reads from it" feature. Three pieces:
+**What just happened**: fixed a real regression reported against
+`apps/engineering`'s หัวหน้าสังกัด (`leader`) role — after ingestion, an
+admin could no longer directly assign a specific user to lead a specific
+department the way the original (pre-ingestion) app allowed, and even once
+the generic `dept_name` → `department_aliases` mapping was configured, the
+leader's landing page stayed blank with no error. See §10b's "Role &
+department mapping" subsection (now extended) for the full root-cause
+writeup. Two bugs, both fixed:
 
-1. **Full CRUD on `attribute_values`**: `services/auth-gateway/src/attributes.ts`
-   gained `renameAttributeValue()` (transactional, cascades to every
-   `user_attributes`/`app_role_rules` row referencing the old value) and
-   `deleteAttributeValue()` (blocked via `AttributeValueInUseError` while
-   still referenced). New `PUT`/`DELETE /admin/attribute-values/:kind/:value`
-   routes (`adminAttributeValues.ts`), both audited. `apps/admin`'s Users
-   panel gained a "Manage" link per column header opening
-   `AttributeValueManagerDialog.tsx` — inline rename/delete, surfacing the
-   409 in-use reason directly.
-2. **Role-rule mapping now reads from the same list instead of free text**:
-   `POST /admin/apps/:appId/role-rules` (`adminRoleRules.ts`) validates any
-   non-null department/position/jobLevel against `attribute_values` before
-   creating a rule — the same "silent typo never matches anyone" bug class
-   §10 had already fixed for `user_attributes`, left open here until now.
-   `apps/assets` and `apps/engineering`'s own `RoleRulesPanel.tsx` (their
-   "Role Rules" admin tab) had their free-text department/position/jobLevel
-   `<Input>`s replaced with `Select`s sourced from the same
-   `GET /auth/admin/attribute-values/:kind` list (a sentinel `"__any__"`
-   value preserves the existing wildcard meaning). `apps/engineering`'s
-   `DeptAliasSection` got the same treatment for its CentralHub-side
-   department picker.
-3. **`apps/assets`'s local role_code field was also still free text** —
-   caught in a follow-up round after the first pass: the "Role code" input
-   in its `RoleRulesPanel.tsx` (`ADM01`, `PUR01`, ...) let an admin type
-   anything. Converted to a `Select` sourced from that app's own
-   `role_assignments` table (the same table `PasswordManagerPanel.tsx`
-   already manages), fetched via the app's own PostgREST client rather than
-   an auth-gateway route, since this vocabulary lives in `assets-db`, not
-   CentralHub's Postgres.
+1. **No per-user escape hatch in department resolution**: the bulk
+   `dept_name` → `department_aliases` chain was the *only* path, with no
+   direct-assignment fallback — a mismatch (unset/mistyped CentralHub
+   attribute, or a value with no real equivalent in engineering's own
+   3-value vocabulary) silently resolved `current_dept()` to `NULL`, which
+   `LeaderPage.tsx`'s `if (!profile?.department_id) return;` turned into a
+   blank page with no error anywhere. Fixed by adding
+   `department_user_overrides` (per-user, checked before the alias
+   fallback — `apps/engineering/db/migrations/20260717000000_dept_user_overrides.sql`),
+   a new `DeptOverridesSection` in `RoleRulesPanel.tsx` to manage it, and a
+   new `DiagnosticsSection` in the same panel showing an admin exactly what
+   role_code + department a given user resolves to (and an explicit warning
+   when a department-scoped role resolves with no department) — so this
+   failure mode is visible directly instead of only as a blank page.
+   Deliberately kept as its own general, role-independent chain (mirroring
+   the existing bulk-rule + per-user-override shape role resolution already
+   has) rather than folded into the role override, since
+   `profiles.department_id` is relied on by every role, not just leader —
+   see the README bullet for the reporter/repairer/department_head detail.
+2. **A second, unrelated bug found while fixing the above**:
+   `LeaderPage.tsx`'s repairer roster query targeted a `user_roles` table
+   that doesn't exist post-ingestion (role is purely JWT-resolved) — the
+   "assign to repairer" dropdown was always empty regardless of department
+   resolution. Fixed with a new `GET /auth/apps/:appId/role-codes` batch
+   lookup route (`services/auth-gateway/src/routes/roleLookup.ts`, gated by
+   `requireSession` only, not `requireAdmin` — a leader who isn't a
+   CentralHub realm admin still needs this), and a
+   `GET /auth/admin/apps/:appId/resolve-role/:userSub` single-user
+   diagnostic route reusing the existing `resolveRoleCode()`
+   (`adminRoleRules.ts`, backs the new `DiagnosticsSection` above).
 
-§13's general deferred table gained one new forward-looking row: replacing
-app-local department vocabularies (e.g. `apps/engineering`'s own
-`departments` table) with the official list directly, retiring alias
-tables — scoped as materially larger (real FK'd entities), not started.
+**Then, later in the same session**: while live-testing the leader fix
+above across multiple roles/departments, five more real issues surfaced.
+All fixed:
 
-**Known-open items** — see §13's tables; nothing else changed this session.
+3. **Dev seed data silently fought an admin's own edits**: `seedDevAttributes()`
+   inserted its two engineering demo rules (`admin`/Manager,
+   `repairer`/Staff+Junior) unconditionally on every `auth-gateway` boot,
+   guarded only by "does an identical row already exist" — so deleting or
+   editing one of those two rows via `RoleRulesPanel` got silently
+   resurrected on the very next container restart, undoing the admin's own
+   change. This is exactly the kind of thing that happens constantly during
+   iterative dev work (rebuilding/redeploying `auth-gateway` for unrelated
+   fixes). Fixed with a new `seedRoleRulesIfEmpty()` helper (`attributes.ts`)
+   that only seeds an app's demo rules while that app has *no* rules at all
+   yet — once an admin has added anything (seeded or their own), it's never
+   touched again. Applied to both `assets`'s and `engineering`'s demo rules.
+   **Consequence worth knowing**: this also means the old implicit
+   self-healing safety net is gone — previously, breaking a demo account's
+   expected role resolution through live experimentation would fix itself
+   on the next `auth-gateway` restart; now it won't, since that's the exact
+   behavior this fix removes. (This surfaced immediately: dev-user's own
+   generic Staff/Junior→repairer rule had been replaced by a more specific
+   department-scoped one during live testing, so `scripts/test-stack.mjs`'s
+   long-standing "dev-user resolves to repairer" assertion started failing
+   post-fix — not a regression, just no more auto-repair. Restored the
+   generic rule by hand and the suite is back to green; see §13's new
+   multi-department row for the related root cause of why that rule got
+   replaced in the first place.)
+4. **Keycloak's own plumbing roles leaked into every role display**:
+   `offline_access`, `uma_authorization`, and `default-roles-<realm>` are
+   auto-granted to every Keycloak user and were flowing straight through
+   into `user_roles`, `/auth/me`'s `roles` array (→ `IdentityBanner`'s
+   badge), and `apps/admin`'s Users table — none of which this repo's own
+   role checks ever query for (no refresh-token/UMA usage anywhere, see
+   §6). Filtered at both of the two independent places they entered:
+   `roles.ts`'s `syncRolesFromKeycloak()` (feeds `user_roles`) and
+   `keycloakAdmin.ts`'s `listUsers()` (a separate direct-from-Keycloak
+   fetch `GET /auth/admin/users` uses) — both now share one
+   `isKeycloakPlumbingRole()` predicate rather than duplicating the
+   exclusion list.
+5. **Adding a duplicate role rule surfaced a raw Postgres error**:
+   `createAppRoleRule()` had no conflict handling, so resubmitting a rule
+   with identical (`role_code`, `department`, `position`, `job_level`)
+   criteria threw `duplicate key value violates unique constraint
+   "app_role_rules_unique_criteria"` straight into the admin's toast. Now
+   throws a `RoleRuleExistsError`, caught in `adminRoleRules.ts` and
+   returned as a clean `409`.
+6. **A durable audit trail for `apps/engineering`'s own destructive
+   actions, from scratch** — there wasn't one. `job_history` exists in the
+   schema but nothing in the frontend has ever written to it (a dead table
+   left over from the original export, like `user_roles` before it), and
+   it couldn't have served as an audit log anyway (`job_id` is `ON DELETE
+   CASCADE`, so it can never outlive the job it's about). Added a new,
+   independent `audit_log` table
+   (`apps/engineering/db/migrations/20260717000001_audit_log.sql` —
+   append-only, denormalized `job_code`/no FK to `repair_jobs`, admin-only
+   `SELECT` via RLS, insert-your-own-actor-id for everyone else, mirroring
+   auth-gateway's own `audit_log` design rather than inventing a different
+   shape) and a shared `logAudit()` helper
+   (`apps/engineering/src/lib/audit.ts`). Wired into the specific actions
+   that were flagged: admin job delete, and leader assign/reassign/
+   revert-to-pending (below) — reporter/repairer's own routine status
+   updates are intentionally not covered yet (scoped down per this
+   session's own discussion; see §13's new row on this). A read-only
+   "ประวัติการดำเนินการ" (Audit) tab was added to `AdminPage.tsx`
+   (`AuditTab`, last 200 rows) so the log is actually visible somewhere,
+   not just written.
+7. **No confirm dialog on delete or on assign/reassign, and no way to
+   undo an assignment**: `AdminPage.tsx`'s job delete used a raw browser
+   `confirm()`; `LeaderPage.tsx`'s assign/reassign fired straight from a
+   `<Select>`'s `onValueChange` with zero confirmation; and once a job was
+   assigned, the only available action was reassigning to a *different*
+   repairer — never back to unassigned. Added a small shared
+   `ConfirmDialog` (`apps/engineering/src/components/ConfirmDialog.tsx`,
+   built on this app's own `alert-dialog.tsx` primitives — can't use
+   `packages/ui`'s version, same React 19 peer conflict as `AssetsNav`/
+   `AppHeader`) used for all four actions (delete, assign, reassign, and a
+   new "ส่งกลับไม่มอบหมาย" revert-to-`pending_assign` action on
+   `LeaderPage.tsx`, which clears `assigned_to`/`assigned_by`/`assigned_at`
+   the same way they looked before `assign()` ever ran). All four now also
+   write to the new `audit_log`.
+8. **A vestigial internal code shown next to every person's name**: several
+   places (`AppHeader.tsx`, `PartsRequisitionTab.tsx`, both of
+   `LeaderPage.tsx`'s repairer dropdowns) displayed `profiles.code` (the
+   first 8 chars of the person's auth UUID) as `"Full Name (a1b2c3d4)"` — a
+   leftover from the original app's code-based login, made redundant once
+   `full_name` became reliably populated from the CentralHub session
+   (§10b's earlier "Full name instead of a raw code" polish already fixed
+   the *missing*-name case but left this parenthetical in place). Removed
+   from all four; left `machine.code` (a real asset tag, e.g. `"Press A
+   (M-102)"`) untouched — different thing entirely, not vestigial.
 
-**Verification approach this session**: extended `scripts/test-stack.mjs`
-with 8 new assertions (add/rename/delete round-trip on an attribute value,
-a blocked delete on an in-use value with the usage counts asserted, and a
-rejected role-rule POST for an unlisted department) — full suite passes
-83/83 against the live stack. Rebuilt and redeployed `auth-gateway`,
-`app-admin`, `app-assets`, `app-engineering`; confirmed the actual shipped
-JS bundles (not just local source) contain the new dropdown/dialog markup,
-since a container rebuild without a redeploy would otherwise look
-identical from source alone. One non-code finding while re-verifying: a
-manual UI testing pass had left `dev-user`'s department attribute changed
-away from its seeded "Purchasing" value, which cascaded into the demo
-ADM01/REQ01 role_code assertions failing — not a regression, just seed
-drift from interactive testing. Restarting `auth-gateway` (its boot-time
-`seedDevAttributes()` upserts, so it self-heals) restored the canonical
-demo state and the suite went back to green — worth knowing if the demo
-accounts' resolved roles ever look wrong after poking at the attribute
-editor by hand.
+Also created four more dev demo accounts, `dev-user2`..`dev-user5`
+(`devuser2123`..`devuser5123`, same convention as `dev-user`), so testing
+department-scoped roles (leader/repairer/reporter, each needing a distinct
+department) doesn't have to reuse `dev-admin`/`dev-user` for every case.
+Seeded into `keycloak/realm-export.json` (fresh-stack path) and
+`permissions.ts`'s `seedDevPermissions()` (same grant shape as `dev-user`:
+read+write on marketing/assets/engineering, nothing on finance) — also
+created live in the already-running Keycloak realm + `app_permissions`
+table for this session's stack, via its Admin REST API (the `realmRoles`
+field in a runtime `POST /users` call is silently ignored by Keycloak,
+unlike the static `--import-realm` file processing that already grants
+`dev-admin`/`dev-user`'s roles correctly — had to assign the `user` realm
+role in a separate `role-mappings/realm` call after creating each account).
+
+**One incident worth flagging**: an early version of
+`scripts/test-stack.mjs`'s `department_user_overrides` test used a plain
+`POST` with no `?on_conflict=user_sub`, which collided with `dev-user`'s own
+override (set via live admin testing) and — in a since-fixed cleanup bug —
+its "restore what was there before" logic silently *deleted* dev-user's
+real override instead, because a failed/empty read was treated as "nothing
+was there to restore" rather than aborting. Caught immediately, restored via
+direct SQL, and the test now throws instead of silently proceeding on any
+read it can't confirm — never treat "couldn't confirm what's there" as "safe
+to overwrite/delete" is now called out explicitly in that test's comments.
+
+**Known-open items** — see §13's tables (now including two new rows from
+this session: multi-department leadership isn't supported, and
+parts-requisition delete still needs the same confirm-dialog/audit
+treatment job delete just got).
+
+**Verification approach this session**: extended `scripts/test-stack.mjs`'s
+§9 `apps/engineering` block with new assertions — a `department_user_overrides`
+round-trip (admin assigns dev-user directly to a seeded department, confirms
+`ensure_profile()` picks it up, then restores whatever was there before,
+not an unconditional delete), and the new `resolve-role`/`role-codes`
+endpoints agreeing with `data-token`'s existing role_code resolution
+(including that the batch lookup is reachable by a non-admin caller).
+Rebuilt and redeployed `auth-gateway`, `app-engineering`, and
+`engineering-migrate` multiple times across this session as each fix
+landed; re-ran the idempotent `engineering-migrate` one-shot against the
+already-running (not fresh-volume) `engineering-db` each time — every
+migration file, including the two new ones this session
+(`20260717000000_dept_user_overrides.sql`,
+`20260717000001_audit_log.sql`), applied cleanly with the expected `NOTICE:
+... already exists, skipping` lines on repeat runs. Full suite: 91/91
+passing against the live stack as of this handoff. Not yet re-verified
+against a genuinely fresh volume (`docker compose down -v` + up) — the
+"temporary exception" below means that hasn't been exercised this session
+either.
 
 **Git/environment state as of this handoff**: all of the above is staged
 for a commit alongside this README update (see the commit this paragraph

@@ -213,25 +213,45 @@ export async function listAppRoleRules(appId: string): Promise<AppRoleRule[]> {
   return result.rows.map(toRule);
 }
 
+export class RoleRuleExistsError extends Error {
+  constructor() {
+    super("a rule with this exact role/department/position/job level combination already exists");
+  }
+}
+
 export async function createAppRoleRule(
   appId: string,
   roleCode: string,
   criteria: { department: string | null; position: string | null; jobLevel: string | null },
 ): Promise<AppRoleRule> {
-  const result = await pool.query<{
-    id: number;
-    app_id: string;
-    role_code: string;
-    department: string | null;
-    position: string | null;
-    job_level: string | null;
-  }>(
-    `INSERT INTO app_role_rules (app_id, role_code, department, position, job_level)
-     VALUES ($1, $2, $3, $4, $5)
-     RETURNING id, app_id, role_code, department, position, job_level`,
-    [appId, roleCode, criteria.department, criteria.position, criteria.jobLevel],
-  );
-  return toRule(result.rows[0]);
+  try {
+    const result = await pool.query<{
+      id: number;
+      app_id: string;
+      role_code: string;
+      department: string | null;
+      position: string | null;
+      job_level: string | null;
+    }>(
+      `INSERT INTO app_role_rules (app_id, role_code, department, position, job_level)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, app_id, role_code, department, position, job_level`,
+      [appId, roleCode, criteria.department, criteria.position, criteria.jobLevel],
+    );
+    return toRule(result.rows[0]);
+  } catch (err) {
+    // 23505 = unique_violation. app_role_rules_unique_criteria (app_id,
+    // role_code, department, position, job_level, NULLS NOT DISTINCT) means
+    // resubmitting an identical rule hits this rather than silently
+    // no-opping like the seed function's own ON CONFLICT DO NOTHING insert
+    // — surfaced as a clear 409 (see adminRoleRules.ts) instead of a raw
+    // "duplicate key value violates unique constraint ..." string reaching
+    // the admin UI's toast.
+    if ((err as { code?: string }).code === "23505") {
+      throw new RoleRuleExistsError();
+    }
+    throw err;
+  }
 }
 
 export async function deleteAppRoleRule(appId: string, id: number): Promise<void> {
@@ -316,6 +336,26 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Seeds a fresh app's demo rules only while it genuinely has none yet — see
+// seedDevAttributes()'s comment on why this can't be a plain ON CONFLICT DO
+// NOTHING insert (that only catches re-inserting an identical row, not "an
+// admin already deleted/edited what used to be here").
+async function seedRoleRulesIfEmpty(
+  appId: string,
+  rules: { roleCode: string; department: string | null; position: string | null; jobLevel: string | null }[],
+): Promise<void> {
+  const existing = await pool.query("SELECT 1 FROM app_role_rules WHERE app_id = $1 LIMIT 1", [appId]);
+  if ((existing.rowCount ?? 0) > 0) return;
+  for (const rule of rules) {
+    await pool.query(
+      `INSERT INTO app_role_rules (app_id, role_code, department, position, job_level)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT ON CONSTRAINT app_role_rules_unique_criteria DO NOTHING`,
+      [appId, rule.roleCode, rule.department, rule.position, rule.jobLevel],
+    );
+  }
+}
+
 // Dev-only demo seed data — mirrors permissions.ts's seedDevPermissions()
 // exactly (same retry rationale: Keycloak's own boot regularly outlasts
 // Postgres's). Reproduces the manual curl-seeded state from this feature's
@@ -333,21 +373,28 @@ export async function seedDevAttributes(maxAttempts = 45, delayMs = 2000): Promi
       if (userSub) {
         await upsertUserAttributes(userSub, { department: "Purchasing", position: "Staff", jobLevel: "Junior" });
       }
-      await pool.query(
-        `INSERT INTO app_role_rules (app_id, role_code, department, position, job_level)
-         VALUES ('assets', 'ADM01', NULL, 'Manager', NULL), ('assets', 'REQ01', NULL, 'Staff', NULL)
-         ON CONFLICT ON CONSTRAINT app_role_rules_unique_criteria DO NOTHING`,
-      );
+      // Guarded on "does this app have ANY rule yet at all" (not just "does
+      // this exact row exist") -- found live: the naive ON CONFLICT DO
+      // NOTHING only stops re-inserting an identical row, so an admin who
+      // deletes or edits one of these two demo rows via RoleRulesPanel got
+      // it silently resurrected on the very next auth-gateway restart,
+      // undoing their own deliberate change. Seeding is meant to give a
+      // fresh stack a working demo, not fight an admin who's since
+      // customized it -- so once an app has any rule of its own, this
+      // never inserts into it again, seeded or not.
+      await seedRoleRulesIfEmpty("assets", [
+        { roleCode: "ADM01", department: null, position: "Manager", jobLevel: null },
+        { roleCode: "REQ01", department: null, position: "Staff", jobLevel: null },
+      ]);
       // apps/engineering demo rules — dev-admin (Manager) resolves to its
       // "admin" role; dev-user (any department, Staff/Junior) resolves to
       // "repairer" via a department-wildcard rule, the exact shape this
       // ingestion's rule model was designed around (see README's
       // engineering ingestion section).
-      await pool.query(
-        `INSERT INTO app_role_rules (app_id, role_code, department, position, job_level)
-         VALUES ('engineering', 'admin', NULL, 'Manager', NULL), ('engineering', 'repairer', NULL, 'Staff', 'Junior')
-         ON CONFLICT ON CONSTRAINT app_role_rules_unique_criteria DO NOTHING`,
-      );
+      await seedRoleRulesIfEmpty("engineering", [
+        { roleCode: "admin", department: null, position: "Manager", jobLevel: null },
+        { roleCode: "repairer", department: null, position: "Staff", jobLevel: "Junior" },
+      ]);
       return;
     } catch (err) {
       if (attempt === maxAttempts) {

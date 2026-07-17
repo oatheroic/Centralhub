@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Eye, BarChart3, ListChecks, History, Package } from "lucide-react";
+import { Eye, BarChart3, ListChecks, History, Package, Undo2 } from "lucide-react";
 import { PartsRequisitionTab } from "@/components/PartsRequisitionTab";
 import { JobFilters, filterJobs } from "@/components/JobFilters";
 import { StatusBadge } from "@/components/StatusBadge";
 import { JobDetailDialog, type JobDetail } from "@/components/JobDetailDialog";
+import ConfirmDialog from "@/components/ConfirmDialog";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { useJobAlerts } from "@/hooks/useJobAlerts";
+import { logAudit } from "@/lib/audit";
 import { Button } from "@/components/ui/button";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
@@ -19,6 +21,14 @@ import {
 
 type Job = JobDetail & { reporter_name?: string; assignee_name?: string; machine_name?: string };
 type Repairer = { id: string; full_name: string; code: string };
+
+// One shared confirm dialog for every job-assignment mutation below, rather
+// than a separate dialog+state per action -- title/description/confirm are
+// derived from which of these fired.
+type PendingAction =
+  | { type: "assign"; job: Job; repId: string; repName: string }
+  | { type: "reassign"; job: Job; repId: string; repName: string }
+  | { type: "revert"; job: Job };
 
 const STATUS_COLORS: Record<string, string> = {
   in_progress: "#3b82f6",
@@ -40,12 +50,12 @@ function LeaderPage() {
 
   const [hMonth, setHMonth] = useState("all");
   const [sMonth, setSMonth] = useState("all");
+  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
 
   const load = async () => {
     if (!profile?.department_id) return;
-    const [{ data: j }, { data: rRoles }, { data: profs }, { data: machs }] = await Promise.all([
+    const [{ data: j }, { data: profs }, { data: machs }] = await Promise.all([
       supabase.from("repair_jobs").select("*").eq("department_id", profile.department_id).order("created_at", { ascending: false }),
-      supabase.from("user_roles").select("user_id, role").eq("role", "repairer"),
       supabase.from("profiles").select("id, code, full_name, department_id"),
       supabase.from("machines").select("id, name, code"),
     ]);
@@ -54,7 +64,25 @@ function LeaderPage() {
     setProfMap(m);
     const machMap = new Map<string, string>();
     (machs ?? []).forEach((mm) => machMap.set(mm.id, mm.code ? `${mm.name} (${mm.code})` : mm.name));
-    const repIds = new Set((rRoles ?? []).map((r) => r.user_id));
+
+    // Role is JWT-resolved only, not stored in any table (see this app's own
+    // schema migration) — the repairer roster can't be found with a
+    // profiles/user_roles join like before ingestion, so it's resolved live
+    // via auth-gateway for just this department's candidate profiles.
+    const deptProfileIds = (profs ?? [])
+      .filter((p) => p.department_id === profile.department_id)
+      .map((p) => p.id);
+    let repIds = new Set<string>();
+    if (deptProfileIds.length > 0) {
+      const res = await fetch(
+        `/auth/apps/engineering/role-codes?subs=${deptProfileIds.join(",")}`,
+        { credentials: "same-origin" },
+      );
+      if (res.ok) {
+        const roleCodes = (await res.json()) as Record<string, string | null>;
+        repIds = new Set(Object.entries(roleCodes).filter(([, r]) => r === "repairer").map(([id]) => id));
+      }
+    }
     setReps((profs ?? [])
       .filter((p) => repIds.has(p.id) && p.department_id === profile.department_id)
       .map((p) => ({ id: p.id, code: p.code, full_name: p.full_name })));
@@ -79,27 +107,55 @@ function LeaderPage() {
     return null;
   }, [profile?.department_id]);
 
-  const assign = async (jobId: string, repId: string) => {
+  const assign = async (job: Job, repId: string, repName: string) => {
     const { error } = await supabase.from("repair_jobs").update({
       assigned_to: repId, assigned_by: profile?.id, assigned_at: new Date().toISOString(),
       status: "in_progress",
-    }).eq("id", jobId);
+    }).eq("id", job.id);
     if (error) toast.error(error.message);
     else {
+      await logAudit(profile, "job.assign", { id: job.id, job_code: job.job_code }, { to: repName });
       toast.success("จ่ายงานแล้ว");
       await load();
     }
   };
 
-  const reassign = async (jobId: string, repId: string) => {
+  const reassign = async (job: Job, repId: string, repName: string) => {
+    const fromName = job.assigned_to ? profMap.get(job.assigned_to) ?? "-" : "-";
     const { error } = await supabase.from("repair_jobs").update({
       assigned_to: repId, assigned_by: profile?.id, assigned_at: new Date().toISOString(),
-    }).eq("id", jobId);
+    }).eq("id", job.id);
     if (error) toast.error(error.message);
     else {
+      await logAudit(profile, "job.reassign", { id: job.id, job_code: job.job_code }, { from: fromName, to: repName });
       toast.success("ย้ายงานแล้ว");
       await load();
     }
+  };
+
+  // Sends an assigned job back to pending_assign -- e.g. to reconsider or
+  // fix a wrong assignment -- clearing the assignment fields the same way
+  // they looked before assign() ever ran.
+  const revertToPending = async (job: Job) => {
+    const fromName = job.assigned_to ? profMap.get(job.assigned_to) ?? "-" : "-";
+    const { error } = await supabase.from("repair_jobs").update({
+      assigned_to: null, assigned_by: null, assigned_at: null, status: "pending_assign",
+    }).eq("id", job.id);
+    if (error) toast.error(error.message);
+    else {
+      await logAudit(profile, "job.revert_to_pending", { id: job.id, job_code: job.job_code }, { from: fromName });
+      toast.success("ส่งงานกลับไม่มอบหมายแล้ว");
+      await load();
+    }
+  };
+
+  const confirmPendingAction = async () => {
+    const action = pendingAction;
+    if (!action) return;
+    setPendingAction(null);
+    if (action.type === "assign") await assign(action.job, action.repId, action.repName);
+    else if (action.type === "reassign") await reassign(action.job, action.repId, action.repName);
+    else await revertToPending(action.job);
   };
 
   const pending = jobs.filter((j) => j.status === "pending_assign");
@@ -126,6 +182,15 @@ function LeaderPage() {
       return { rep: r, total: list.length, data };
     });
   }, [reps, statsJobs]);
+
+  if (!profile?.department_id) {
+    return (
+      <div className="card-soft p-5 text-sm text-muted-foreground">
+        แผนก/สังกัดของคุณยังไม่ได้ถูกกำหนดในระบบนี้ กรุณาติดต่อผู้ดูแลระบบให้ตั้งค่า
+        "กำหนดแผนกรายบุคคล" หรือ "จับคู่แผนก CentralHub" ให้บัญชีของคุณ
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
@@ -163,11 +228,17 @@ function LeaderPage() {
                       ผู้แจ้ง: {profMap.get(j.reporter_id) ?? "-"} · {new Date(j.created_at).toLocaleString("th-TH")}
                     </div>
                     <div className="flex gap-2 items-center">
-                      <Select onValueChange={(v) => assign(j.id, v)}>
+                      <Select
+                        value=""
+                        onValueChange={(v) => {
+                          const rep = reps.find((r) => r.id === v);
+                          if (rep) setPendingAction({ type: "assign", job: j, repId: rep.id, repName: rep.full_name });
+                        }}
+                      >
                         <SelectTrigger><SelectValue placeholder="จ่ายงานให้ผู้ซ่อม…" /></SelectTrigger>
                         <SelectContent>
                           {reps.length === 0 && <SelectItem value="-" disabled>ยังไม่มีผู้ซ่อมในสังกัด</SelectItem>}
-                          {reps.map((r) => <SelectItem key={r.id} value={r.id}>{r.full_name} ({r.code})</SelectItem>)}
+                          {reps.map((r) => <SelectItem key={r.id} value={r.id}>{r.full_name}</SelectItem>)}
                         </SelectContent>
                       </Select>
                       <Button size="sm" variant="outline" onClick={() => setDetail(j)}><Eye className="size-4" /></Button>
@@ -190,15 +261,27 @@ function LeaderPage() {
                     <div className="text-xs text-muted-foreground">
                       ผู้ซ่อม: {j.assigned_to ? profMap.get(j.assigned_to) ?? "-" : "-"}
                     </div>
-                    <div className="flex gap-2 items-center">
+                    <div className="flex gap-2 items-center flex-wrap">
                       {j.status !== "awaiting_review" && (
-                        <Select value={j.assigned_to ?? undefined} onValueChange={(v) => reassign(j.id, v)}>
+                        <Select
+                          value={j.assigned_to ?? undefined}
+                          onValueChange={(v) => {
+                            const rep = reps.find((r) => r.id === v);
+                            if (rep) setPendingAction({ type: "reassign", job: j, repId: rep.id, repName: rep.full_name });
+                          }}
+                        >
                           <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="ย้ายงานให้ผู้ซ่อม…" /></SelectTrigger>
                           <SelectContent>
-                            {reps.map((r) => <SelectItem key={r.id} value={r.id}>{r.full_name} ({r.code})</SelectItem>)}
+                            {reps.map((r) => <SelectItem key={r.id} value={r.id}>{r.full_name}</SelectItem>)}
                           </SelectContent>
                         </Select>
                       )}
+                      <Button
+                        size="sm" variant="outline"
+                        onClick={() => setPendingAction({ type: "revert", job: j })}
+                      >
+                        <Undo2 className="size-4 mr-1" />ส่งกลับไม่มอบหมาย
+                      </Button>
                       <Button size="sm" variant="outline" onClick={() => setDetail(j)}><Eye className="size-4 mr-1" />รายละเอียด</Button>
                     </div>
                   </div>
@@ -297,6 +380,28 @@ function LeaderPage() {
       </Tabs>
 
       <JobDetailDialog job={detail} open={!!detail} onOpenChange={(o) => !o && setDetail(null)} />
+
+      <ConfirmDialog
+        open={!!pendingAction}
+        onOpenChange={(o) => !o && setPendingAction(null)}
+        title={
+          pendingAction?.type === "assign" ? "จ่ายงานนี้ให้ผู้ซ่อม?"
+          : pendingAction?.type === "reassign" ? "ย้ายงานนี้ไปให้ผู้ซ่อมคนใหม่?"
+          : "ส่งงานนี้กลับไม่มอบหมาย?"
+        }
+        description={
+          pendingAction?.type === "assign"
+            ? `งาน ${pendingAction.job.job_code} จะถูกจ่ายให้ ${pendingAction.repName}`
+          : pendingAction?.type === "reassign"
+            ? `งาน ${pendingAction.job.job_code} จะถูกย้ายจากผู้ซ่อมคนเดิมไปให้ ${pendingAction.repName}`
+          : pendingAction?.type === "revert"
+            ? `งาน ${pendingAction.job.job_code} จะกลับไปเป็นสถานะ "รอจ่ายงาน" และเลิกมอบหมายผู้ซ่อมคนปัจจุบัน`
+          : ""
+        }
+        confirmLabel={pendingAction?.type === "revert" ? "ส่งกลับ" : "ยืนยัน"}
+        destructive={pendingAction?.type === "revert"}
+        onConfirm={confirmPendingAction}
+      />
     </div>
   );
 }

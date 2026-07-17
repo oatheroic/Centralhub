@@ -98,7 +98,7 @@ export function PartsRequisitionTab({
     else { toast.success("ลบแล้ว"); await load(); }
   };
 
-  const repMap = useMemo(() => new Map(repairers.map((r) => [r.id, `${r.full_name} (${r.code})`])), [repairers]);
+  const repMap = useMemo(() => new Map(repairers.map((r) => [r.id, r.full_name])), [repairers]);
 
   const months = useMemo(() => {
     const s = new Set<string>();

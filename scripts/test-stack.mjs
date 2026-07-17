@@ -586,8 +586,9 @@ async function main() {
     ok("DELETE test row -> 204", res.status === 204, `status ${res.status}`);
   });
 
-  // -- 9. apps/engineering: data-token, role_code, RLS, provisioning (§10b) --
-  section("9. apps/engineering — data-token, role resolution, RLS, ensure_profile");
+  // -- 9. apps/engineering: data-token, role_code, RLS, provisioning,       --
+  // -- department_user_overrides, resolve-role/role-codes lookups (§10b) --
+  section("9. apps/engineering — data-token, role resolution, RLS, ensure_profile, department overrides");
   let engAdminToken, engUserToken;
   await must("data-token mints for both users, resolving the seeded role_code", async () => {
     const adminData = await getJson(admin, `${GATEWAY}/auth/data-token?app=engineering`);
@@ -651,6 +652,105 @@ async function main() {
 
     const stillAdmin = await getJson(admin, `${GATEWAY}/auth/data-token?app=engineering`);
     ok("dev-admin's role_code is still admin after the rejected attempt", stillAdmin.body?.role_code === "admin", JSON.stringify(stillAdmin.body));
+  });
+
+  await must("department_user_overrides: a direct per-user override resolves through current_dept()/ensure_profile()", async () => {
+    // Regression guard for the "leader lands on a blank page" incident:
+    // profiles.department_id must resolve from an explicit per-user
+    // override, not only the bulk dept_name -> department_aliases lookup.
+    // dev-user may already have a live-admin-configured override from
+    // manual UI testing -- this test must not clobber that: it saves
+    // whatever's there beforehand and restores it exactly, rather than
+    // unconditionally deleting the row at the end.
+    const deptsRes = await hop(admin, `${ENG_REST}/departments?select=id,name&limit=2`, {
+      headers: { Authorization: `Bearer ${engAdminToken}` },
+    });
+    const depts = await deptsRes.json().catch(() => []);
+    ok("departments table has at least two seeded departments", Array.isArray(depts) && depts.length >= 2, JSON.stringify(depts));
+
+    const existingRes = await hop(admin, `${ENG_REST}/department_user_overrides?user_sub=eq.${userSub}&select=department_id`, {
+      headers: { Authorization: `Bearer ${engAdminToken}` },
+    });
+    // Deliberately fails loudly (throws) rather than falling back to "no
+    // pre-existing row" on any read failure -- an admin's real override row
+    // (set via live UI testing) was silently deleted by an earlier version
+    // of this test that caught this exact fetch/parse failure into `[]`,
+    // then took that as license to unconditionally DELETE at cleanup time.
+    // Never treat "couldn't confirm what's there" as "safe to overwrite/delete".
+    if (!existingRes.ok) {
+      throw new Error(`could not read pre-existing department_user_overrides row (status ${existingRes.status}) -- aborting rather than risking data loss`);
+    }
+    const existingRows = await existingRes.json();
+    const existing = existingRows[0] ?? null;
+    // Pick a department that differs from any existing override, so the
+    // upcoming ensure_profile() assertion can't pass by coincidence.
+    const deptId = depts.find((d) => d.id !== existing?.department_id)?.id ?? depts[0].id;
+
+    const upsertRes = await hop(admin, `${ENG_REST}/department_user_overrides?on_conflict=user_sub`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${engAdminToken}`,
+        "content-type": "application/json",
+        prefer: "return=representation,resolution=merge-duplicates",
+      },
+      body: JSON.stringify({ user_sub: userSub, department_id: deptId }),
+    });
+    const upserted = await upsertRes.json().catch(() => null);
+    // 201 for a fresh insert, 200 when the on_conflict path resolves to an
+    // UPDATE instead (e.g. dev-user already had a row from live admin testing).
+    ok(
+      "admin POST department_user_overrides (upsert) -> 200/201",
+      upsertRes.status === 200 || upsertRes.status === 201,
+      `status ${upsertRes.status} ${JSON.stringify(upserted)}`,
+    );
+
+    const profRes = await hop(user, `${ENG_REST}/rpc/ensure_profile`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${engUserToken}`, "content-type": "application/json" },
+      body: "{}",
+    });
+    const prof = await profRes.json().catch(() => null);
+    ok("dev-user's ensure_profile() department_id now matches the override", prof?.department_id === deptId, JSON.stringify(prof));
+
+    if (existing) {
+      const restoreRes = await hop(admin, `${ENG_REST}/department_user_overrides?on_conflict=user_sub`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${engAdminToken}`,
+          "content-type": "application/json",
+          prefer: "resolution=merge-duplicates",
+        },
+        body: JSON.stringify({ user_sub: userSub, department_id: existing.department_id }),
+      });
+      ok(
+        "restored dev-user's pre-existing override -> 200/201",
+        restoreRes.status === 200 || restoreRes.status === 201,
+        `status ${restoreRes.status}`,
+      );
+    } else {
+      const delRes = await hop(admin, `${ENG_REST}/department_user_overrides?user_sub=eq.${userSub}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${engAdminToken}` },
+      });
+      ok("cleanup DELETE department_user_overrides -> 204", delRes.status === 204, `status ${delRes.status}`);
+    }
+  });
+
+  await must("resolve-role diagnostics route and the batch role-codes lookup agree with data-token's resolution", async () => {
+    const resolveRes = await getJson(admin, `${GATEWAY}/auth/admin/apps/engineering/resolve-role/${userSub}`);
+    ok("GET .../resolve-role/:userSub -> 200", resolveRes.status === 200, `status ${resolveRes.status}`);
+    ok("resolved role_code is repairer, same as data-token", resolveRes.body?.roleCode === "repairer", JSON.stringify(resolveRes.body));
+
+    // Deliberately called as dev-user (not an admin) -- unlike the
+    // /admin/... routes, this lookup backs LeaderPage.tsx's repairer roster
+    // for a leader who isn't necessarily a CentralHub realm admin.
+    const batchRes = await getJson(user, `${GATEWAY}/auth/apps/engineering/role-codes?subs=${userSub},${adminSub}`);
+    ok("GET apps/engineering/role-codes -> 200 for a non-admin caller", batchRes.status === 200, `status ${batchRes.status}`);
+    ok(
+      "batch lookup resolves dev-user to repairer and dev-admin to admin",
+      batchRes.body?.[userSub] === "repairer" && batchRes.body?.[adminSub] === "admin",
+      JSON.stringify(batchRes.body),
+    );
   });
 
   // -- 10. Inference gateway is reachable only when authenticated (§12) -----

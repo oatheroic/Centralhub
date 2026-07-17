@@ -160,6 +160,15 @@ export async function seedDevPermissions(maxAttempts = 45, delayMs = 2000): Prom
       await seedRow("dev-user", "engineering", { read: true, write: true });
       // dev-user gets no row at all for finance — default-deny demonstrates
       // the permission-denied redirect page.
+      // dev-user2..5: same shape as dev-user, added so §10b's engineering
+      // role/department resolution (leader/repairer/reporter, each
+      // department-scoped) has enough distinct accounts to assign one role
+      // each without reusing dev-admin/dev-user for every case.
+      for (const username of ["dev-user2", "dev-user3", "dev-user4", "dev-user5"]) {
+        await seedRow(username, "marketing", { read: true, write: true });
+        await seedRow(username, "assets", { read: true, write: true });
+        await seedRow(username, "engineering", { read: true, write: true });
+      }
       return;
     } catch (err) {
       if (attempt === maxAttempts) {

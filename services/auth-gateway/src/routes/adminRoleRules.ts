@@ -1,6 +1,9 @@
 import { Router, type Response } from "express";
 import { requireSession, requireAdmin, type AuthedRequest } from "../middleware/requireAdmin.js";
-import { listAppRoleRules, createAppRoleRule, deleteAppRoleRule, listAttributeValues } from "../attributes.js";
+import {
+  listAppRoleRules, createAppRoleRule, deleteAppRoleRule, listAttributeValues, resolveRoleCode,
+  RoleRuleExistsError,
+} from "../attributes.js";
 import { KNOWN_APPS } from "../permissions.js";
 import { recordAudit } from "../audit.js";
 
@@ -82,7 +85,32 @@ adminRoleRulesRouter.post(
       });
       res.status(201).json(rule);
     } catch (err) {
+      if (err instanceof RoleRuleExistsError) {
+        res.status(409).json({ error: err.message });
+        return;
+      }
       console.error("auth-gateway: role rule creation failed", err);
+      res.status(502).json({ error: (err as Error).message });
+    }
+  },
+);
+
+// Diagnostics: exposes the exact same precedence resolveRoleCode() already
+// uses for dataToken.ts, for an arbitrary target user, so an admin can see
+// what role_code a user WOULD get without that user logging in first — lets
+// a misconfigured rule/override/alias chain be caught directly instead of
+// manifesting only as a silent blank page in the app itself.
+adminRoleRulesRouter.get(
+  "/admin/apps/:appId/resolve-role/:userSub",
+  requireSession,
+  requireAdmin,
+  async (req, res) => {
+    const appId = req.params.appId as string;
+    if (!checkKnownApp(appId, res)) return;
+    try {
+      const roleCode = await resolveRoleCode(req.params.userSub as string, appId);
+      res.json({ roleCode });
+    } catch (err) {
       res.status(502).json({ error: (err as Error).message });
     }
   },

@@ -37,6 +37,9 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import RoleRulesPanel from "@/components/RoleRulesPanel";
+import ConfirmDialog from "@/components/ConfirmDialog";
+import { useAuth } from "@/hooks/useAuth";
+import { logAudit } from "@/lib/audit";
 import { STATUS_LABEL, LEADER_DEPT_NAMES, ROLE_LABEL, type AppRole } from "@/lib/auth-utils";
 
 type Dept = { id: string; name: string };
@@ -127,6 +130,7 @@ function AdminPage() {
           <TabsTrigger value="users"><Users className="size-4 mr-1" />ผู้ใช้งาน</TabsTrigger>
           <TabsTrigger value="access"><KeyRound className="size-4 mr-1" />สิทธิ์การเข้าถึง</TabsTrigger>
           <TabsTrigger value="setup"><Building2 className="size-4 mr-1" />แผนก/เครื่องจักร</TabsTrigger>
+          <TabsTrigger value="audit"><History className="size-4 mr-1" />ประวัติการดำเนินการ</TabsTrigger>
         </TabsList>
 
         <TabsContent value="status"><JobList jobs={filteredJobs(["pending_assign","in_progress","waiting_parts","external","awaiting_review"])} onView={setDetail} onEdit={setEditJob} reload={loadAll} depts={depts} /></TabsContent>
@@ -144,6 +148,9 @@ function AdminPage() {
         </TabsContent>
         <TabsContent value="setup">
           <SetupTab depts={depts} mtypes={mtypes} machines={machines} reload={loadAll} />
+        </TabsContent>
+        <TabsContent value="audit">
+          <AuditTab />
         </TabsContent>
       </Tabs>
 
@@ -172,12 +179,25 @@ function JobList({ jobs, onView, onEdit, reload, depts }: {
   jobs: Job[]; onView: (j: Job) => void; onEdit: (j: Job) => void; reload: () => Promise<void>;
   depts?: Dept[];
 }) {
+  const { profile } = useAuth();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
   const [dept, setDept] = useState("all");
-  const onDelete = async (id: string) => {
-    if (!confirm("ลบงานซ่อมนี้? ข้อมูลทั้งหมดจะหายถาวร")) return;
-    const { error } = await supabase.from("repair_jobs").delete().eq("id", id);
+  const [pendingDelete, setPendingDelete] = useState<Job | null>(null);
+
+  const confirmDelete = async () => {
+    const job = pendingDelete;
+    if (!job) return;
+    setPendingDelete(null);
+    // Logged before the DELETE, not after -- audit_log has no FK to
+    // repair_jobs (see the migration), but the job's own fields (title,
+    // status, reporter/assignee) only exist to read right up until the
+    // delete actually runs.
+    await logAudit(profile, "job.delete", { id: job.id, job_code: job.job_code }, {
+      title: job.title, status: job.status, department: job.dept_name,
+      reporter: job.reporter_name, assignee: job.assignee_name,
+    });
+    const { error } = await supabase.from("repair_jobs").delete().eq("id", job.id);
     if (error) toast.error(error.message); else { toast.success("ลบแล้ว"); await reload(); }
   };
   const filtered = filterJobs(jobs, search, status, dept);
@@ -206,10 +226,19 @@ function JobList({ jobs, onView, onEdit, reload, depts }: {
           <div className="flex items-center gap-1">
             <Button size="sm" variant="outline" onClick={() => onView(j)}>ดูรายละเอียด</Button>
             <Button size="sm" variant="outline" onClick={() => onEdit(j)}><Pencil className="size-4" /></Button>
-            <Button size="sm" variant="ghost" onClick={() => onDelete(j.id)}><Trash2 className="size-4 text-destructive" /></Button>
+            <Button size="sm" variant="ghost" onClick={() => setPendingDelete(j)}><Trash2 className="size-4 text-destructive" /></Button>
           </div>
         </div>
       ))}
+      <ConfirmDialog
+        open={!!pendingDelete}
+        onOpenChange={(o) => !o && setPendingDelete(null)}
+        title="ลบงานซ่อมนี้?"
+        description={`งาน ${pendingDelete?.job_code ?? ""} "${pendingDelete?.title ?? ""}" และข้อมูลทั้งหมดที่เกี่ยวข้องจะถูกลบถาวร ไม่สามารถกู้คืนได้`}
+        confirmLabel="ลบถาวร"
+        destructive
+        onConfirm={confirmDelete}
+      />
     </div>
   );
 }
@@ -812,6 +841,70 @@ function AdminStats({ jobs, depts }: { jobs: Job[]; depts: Dept[] }) {
             );
           })}
         </div>
+      </div>
+    </div>
+  );
+}
+
+type AuditRow = {
+  id: number; actor_name: string | null; action: string;
+  job_code: string | null; detail: Record<string, unknown> | null; created_at: string;
+};
+
+const AUDIT_ACTION_LABEL: Record<string, string> = {
+  "job.delete": "ลบงานซ่อม",
+  "job.assign": "มอบหมายงาน",
+  "job.reassign": "ย้ายงานให้ผู้ซ่อมคนใหม่",
+  "job.revert_to_pending": "ส่งงานกลับไม่มอบหมาย",
+};
+
+// Read-only -- RLS on audit_log restricts SELECT to the admin role_code
+// already (see 20260717000001_audit_log.sql), this tab is just a viewer.
+// Append-only by design: no edit/delete UI here, matching an audit log's
+// whole point.
+function AuditTab() {
+  const [rows, setRows] = useState<AuditRow[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase
+        .from("audit_log")
+        .select("id, actor_name, action, job_code, detail, created_at")
+        .order("created_at", { ascending: false })
+        .limit(200);
+      setRows((data ?? []) as AuditRow[]);
+      setLoading(false);
+    })();
+  }, []);
+
+  return (
+    <div className="card-soft p-5">
+      <h2 className="font-bold mb-3">ประวัติการดำเนินการ (200 รายการล่าสุด)</h2>
+      {loading && <div className="text-sm text-muted-foreground">กำลังโหลด...</div>}
+      {!loading && rows.length === 0 && (
+        <div className="text-sm text-muted-foreground">ยังไม่มีประวัติการดำเนินการ</div>
+      )}
+      <div className="space-y-2">
+        {rows.map((r) => (
+          <div key={r.id} className="border rounded-lg p-3 text-sm">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-semibold">{AUDIT_ACTION_LABEL[r.action] ?? r.action}</span>
+              {r.job_code && <span className="font-mono text-brand text-xs">{r.job_code}</span>}
+              <span className="text-xs text-muted-foreground ml-auto">
+                {new Date(r.created_at).toLocaleString("th-TH")}
+              </span>
+            </div>
+            <div className="text-xs text-muted-foreground mt-1">
+              โดย: {r.actor_name ?? "ไม่ทราบผู้ดำเนินการ"}
+            </div>
+            {r.detail && (
+              <div className="text-xs text-muted-foreground mt-1 font-mono break-all">
+                {JSON.stringify(r.detail)}
+              </div>
+            )}
+          </div>
+        ))}
       </div>
     </div>
   );
