@@ -85,7 +85,16 @@ export type AppUsage = { appPermissions: number; appRoleRules: number; appRoleOv
 
 export async function countAppUsage(id: string): Promise<AppUsage> {
   const [perms, rules, overrides] = await Promise.all([
-    pool.query<{ count: string }>("SELECT COUNT(*) FROM app_permissions WHERE app_id = $1", [id]),
+    // Only counts a row that actually grants something. upsertPermission()
+    // (permissions.ts) is a plain upsert — clearing every checkbox in the
+    // Permissions tab writes an all-false row rather than deleting it, so
+    // counting mere row existence would keep reporting an app "in use"
+    // after every real grant was removed, blocking a delete that should
+    // now be allowed.
+    pool.query<{ count: string }>(
+      "SELECT COUNT(*) FROM app_permissions WHERE app_id = $1 AND (can_read OR can_write OR can_edit OR can_delete)",
+      [id],
+    ),
     pool.query<{ count: string }>("SELECT COUNT(*) FROM app_role_rules WHERE app_id = $1", [id]),
     pool.query<{ count: string }>("SELECT COUNT(*) FROM app_role_overrides WHERE app_id = $1", [id]),
   ]);

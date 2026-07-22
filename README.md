@@ -1350,7 +1350,7 @@ live from auth-gateway's `apps` table; see §12b.
   was already zero-edit per app (see Pillar 2); nothing here changes that
   boundary. Registering an app's metadata and actually deploying it remain
   two separate, independently-orderable steps.
-- **Found via live testing, both fixed**:
+- **Found via live testing, all fixed**:
   - The reachability check first shipped using a `HEAD` request and
     treating any 2xx as "Reachable" — but Nginx's `error_page 403 =
     @permission_denied` (see §7) comes back as a plain HTTP 200 rendering
@@ -1380,6 +1380,16 @@ live from auth-gateway's `apps` table; see §12b.
     `permission.update`/`attribute.update` already do: the PUT route now
     records a `{ before, after }` pair, and the admin UI diffs every field
     for display.
+  - Deleting an app stayed blocked ("still referenced by 1 permission
+    row") even after clearing every checkbox for it in the Permissions
+    tab. Root cause: `upsertPermission()` (`permissions.ts`) is a plain
+    upsert — clearing all four verbs writes an all-`false` row rather than
+    deleting it, so `countAppUsage()`'s original `COUNT(*) FROM
+    app_permissions WHERE app_id = $1` kept counting that inert row as
+    "in use." Fixed by only counting a row that actually grants something
+    (`can_read OR can_write OR can_edit OR can_delete`) — an all-false row
+    is functionally identical to no row at all, per the same deny-all
+    default `getPermission()` already applies elsewhere.
 - **Status**: done — backend CRUD, manifest sync (including the four
   non-platform apps), the central-hub dashboard switch, the admin Apps tab
   (icon picker, reachability check, styled flag badges), the friendly
