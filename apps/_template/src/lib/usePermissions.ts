@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 
 // Copy this file into a new app's src/lib/ and set APP_ID to match the
 // app's id (the same id used for the app-<id> compose service and the
-// gateway's /apps/<id>/ route, and that must also be added to
-// services/auth-gateway/src/permissions.ts's KNOWN_APPS list — see README
-// "Pillar 4" for the full wiring checklist).
+// gateway's /apps/<id>/ route — copy app.manifest.json.example to
+// app.manifest.json and it registers itself as a known app automatically
+// on the next `stack:up`; see README "Pillar 4" for the full checklist).
 const APP_ID = "_template";
 
 export type PermissionSet = { read: boolean; write: boolean; edit: boolean; delete: boolean };

@@ -1,14 +1,22 @@
 import type { AppRegistryEntry } from "../registry/apps";
 import { recordAppOpen } from "../lib/recentApps";
+import { iconFor } from "../lib/icons";
+
+// Not part of the wire shape (services/auth-gateway/src/apps.ts) — derived
+// from id the same way both the server and the old static registry always
+// meant it, avoiding a redundant, driftable field.
+function appPath(id: string): string {
+  return id === "central-hub" ? "/" : `/apps/${id}/`;
+}
 
 export function AppCard({ app }: { app: AppRegistryEntry }) {
-  const Icon = app.icon;
+  const Icon = iconFor(app.icon);
 
   function handleOpen() {
     recordAppOpen(app.id);
     // Real session cookies (chub_session) travel automatically on any
     // same-origin navigation — no manual cookie-setting needed anymore.
-    window.location.href = app.path;
+    window.location.href = appPath(app.id);
   }
 
   return (

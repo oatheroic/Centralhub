@@ -354,7 +354,7 @@ async function main() {
 
   // -- 5. Client-side permission API (feeds usePermissions/useGuardedAction) -
   section("5. /auth/permissions (per-verb flags for client-side guards)");
-  await must("dev-admin has full access to every KNOWN_APPS entry", async () => {
+  await must("dev-admin has full access to every known app", async () => {
     for (const app of ["marketing", "finance", "assets"]) {
       const { status, body } = await getJson(admin, `${GATEWAY}/auth/permissions?app=${app}`);
       ok(`dev-admin ${app}: read/write/edit/delete all true`, status === 200 && body.read && body.write && body.edit && body.delete, JSON.stringify(body));
@@ -403,7 +403,18 @@ async function main() {
 
     const matrixRes = await getJson(admin, `${GATEWAY}/auth/admin/permissions`);
     ok("GET /auth/admin/permissions -> 200", matrixRes.status === 200, `status ${matrixRes.status}`);
-    ok("matrix apps == KNOWN_APPS", JSON.stringify((matrixRes.body?.apps || []).slice().sort()) === JSON.stringify(["assets", "engineering", "finance", "marketing"]), JSON.stringify(matrixRes.body?.apps));
+    // Cross-checks against the live apps registry (§13's dynamic app
+    // registry) instead of a hardcoded literal — both getMatrix() and this
+    // assertion now derive "which apps are known" from the same apps table
+    // (see services/auth-gateway/src/apps.ts's listKnownAppIds()), so this
+    // proves they stay in sync rather than just re-asserting a fixed list.
+    const registryRes = await getJson(admin, `${GATEWAY}/auth/admin/apps`);
+    const knownFromRegistry = (registryRes.body || []).filter((a) => a.knownApp).map((a) => a.id).sort();
+    ok(
+      "matrix apps == live apps registry's known-app ids",
+      JSON.stringify((matrixRes.body?.apps || []).slice().sort()) === JSON.stringify(knownFromRegistry),
+      JSON.stringify({ matrix: matrixRes.body?.apps, registry: knownFromRegistry }),
+    );
     const userRow = matrixRes.body?.permissions?.[userSub]?.finance;
     ok("matrix confirms dev-user has no finance access", userRow && !userRow.read && !userRow.write, JSON.stringify(userRow));
   });
@@ -478,6 +489,47 @@ async function main() {
       body: JSON.stringify({ roleCode: "ZZTEST", department: `Not-A-Real-Dept-${Date.now()}`, position: null, jobLevel: null }),
     });
     ok("POST role-rules with unlisted department -> 400", res.status === 400, `status ${res.status}`);
+  });
+
+  // -- 6c. Dynamic app registry (apps table, replacing apps.ts/KNOWN_APPS) --
+  section("6c. Dynamic app registry — /auth/apps and admin CRUD");
+  await must("/auth/apps is session-gated and lists every seeded app", async () => {
+    const anon = await hop(makeJar(), `${GATEWAY}/auth/apps`);
+    ok("anonymous GET /auth/apps -> 401", anon.status === 401, `status ${anon.status}`);
+
+    const res = await getJson(user, `${GATEWAY}/auth/apps`);
+    ok("dev-user GET /auth/apps -> 200 array", res.status === 200 && Array.isArray(res.body), `status ${res.status}`);
+    const byId = Object.fromEntries((res.body || []).map((a) => [a.id, a]));
+    ok("includes central-hub (hidden)", byId["central-hub"]?.hidden === true, JSON.stringify(byId["central-hub"]));
+    ok("includes admin (requiresRole)", byId.admin?.requiresRole === "admin", JSON.stringify(byId.admin));
+    ok("includes marketing/finance/assets/engineering", ["marketing", "finance", "assets", "engineering"].every((id) => byId[id]), JSON.stringify(Object.keys(byId)));
+  });
+
+  await must("admin can create, read back, and delete a throwaway app row", async () => {
+    const id = `zztest-${Date.now()}`;
+    const created = await getJson(admin, `${GATEWAY}/auth/admin/apps`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id, name: "ZZ Test", department: "QA", icon: "Boxes" }),
+    });
+    ok("POST /auth/admin/apps -> 201", created.status === 201 && created.body?.id === id, JSON.stringify(created.body));
+    ok("created row defaults source=manual, knownApp=true", created.body?.source === "manual" && created.body?.knownApp === true, JSON.stringify(created.body));
+
+    const listed = await getJson(user, `${GATEWAY}/auth/apps`);
+    ok("new row appears in /auth/apps without a restart", (listed.body || []).some((a) => a.id === id), JSON.stringify(listed.body?.map((a) => a.id)));
+
+    const deleted = await hop(admin, `${GATEWAY}/auth/admin/apps/${id}`, { method: "DELETE" });
+    ok("DELETE unused app -> 204", deleted.status === 204, `status ${deleted.status}`);
+
+    const afterDelete = await getJson(user, `${GATEWAY}/auth/apps`);
+    ok("deleted row no longer listed", !(afterDelete.body || []).some((a) => a.id === id), JSON.stringify(afterDelete.body?.map((a) => a.id)));
+  });
+
+  await must("delete is blocked while an app is still referenced by real data", async () => {
+    // marketing has real app_permissions rows for dev-admin/dev-user seeded
+    // earlier in this run -- a genuine in-use check, not an empty app.
+    const res = await hop(admin, `${GATEWAY}/auth/admin/apps/marketing`, { method: "DELETE" });
+    ok("DELETE in-use app -> 409", res.status === 409, `status ${res.status}`);
   });
 
   // -- 7. apps/assets: data-token + identity->role_code mapping (§10) -------

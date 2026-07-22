@@ -1,43 +1,13 @@
 import { pool } from "./db.js";
 import { findUserSubByUsername } from "./keycloakAdmin.js";
 import { hasRole } from "./roles.js";
+import { adminRoleCodeFor } from "./apps.js";
 
 export type UserAttributes = {
   department: string;
   position: string;
   jobLevel: string;
 };
-
-// Apps that want "any CentralHub Keycloak admin is automatically this
-// app's admin" as an absolute guarantee — checked first in
-// resolveRoleCode(), ahead of even a per-user override, so a real
-// CentralHub admin can never be locked out of admin access in one of
-// these apps via a rule or override (the exact failure mode this closes:
-// see README's engineering ingestion section on the dev-admin
-// self-lockout incident). Opt-in, keyed by the app's own role_code string
-// for "admin" — not every app's vocabulary uses the literal word.
-// Only lists apps that actually resolve a role_code via this attributes/
-// rules system at all (apps/marketing and apps/finance use the native
-// read/write/edit/delete gate directly, with no role_code concept, so
-// they have nothing to list here; apps/admin's own access is Keycloak's
-// admin realm role checked directly by Nginx, same story). Hand-
-// maintained the same way KNOWN_APPS is.
-const CENTRALHUB_ADMIN_ROLE_CODE: Record<string, string> = {
-  engineering: "admin",
-  // apps/assets' own role_assignments table marks whichever role_code has
-  // is_admin = true as its admin — ADM01 by seed-data convention (see
-  // seedDevAttributes below and the README's assets ingestion section),
-  // not a hardcoded meaning of the string itself. If assets' own seed data
-  // is ever changed to use a different admin code, update this too.
-  assets: "ADM01",
-};
-
-// Exposed so the override-CRUD route can reject a write that would be
-// silently inert (see adminRoleOverrides.ts) — the map itself stays
-// module-private so appId -> role_code is only ever read through here.
-export function guaranteedAdminRoleCodeFor(appId: string): string | null {
-  return CENTRALHUB_ADMIN_ROLE_CODE[appId] ?? null;
-}
 
 export async function getUserAttributes(userSub: string): Promise<UserAttributes | null> {
   const result = await pool.query<{ department: string; position: string; job_level: string }>(
@@ -288,7 +258,8 @@ export async function deleteAppRoleOverride(appId: string, id: number): Promise<
 }
 
 // Resolves a user's role_code for an app. Checked in order: (0) for an app
-// opted into CENTRALHUB_ADMIN_ROLE_CODE above, a CentralHub Keycloak admin
+// with apps.ts's adminRoleCode set (admin-managed, see the apps table's
+// security-boundary comment in db.ts), a CentralHub Keycloak admin
 // always resolves to that app's admin role_code — absolute, wins even over
 // an explicit override, so a real admin can never be scoped down in that
 // app by a rule/override mistake; (1) a per-user override — a named
@@ -300,7 +271,7 @@ export async function deleteAppRoleOverride(appId: string, id: number): Promise<
 // by lowest rule id, so rule creation order is a stable, predictable
 // tiebreaker.
 export async function resolveRoleCode(userSub: string, appId: string): Promise<string | null> {
-  const guaranteedAdminRoleCode = CENTRALHUB_ADMIN_ROLE_CODE[appId];
+  const guaranteedAdminRoleCode = await adminRoleCodeFor(appId);
   if (guaranteedAdminRoleCode && (await hasRole(userSub, "admin"))) {
     return guaranteedAdminRoleCode;
   }

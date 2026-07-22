@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, EmptyState, Input, ThemeToggle } from "@centralhub/ui";
-import { appRegistry, type AppRegistryEntry } from "./registry/apps";
+import { Button, EmptyState, Input, Skeleton, ThemeToggle } from "@centralhub/ui";
+import type { AppRegistryEntry } from "./registry/apps";
+import { useAppRegistry } from "./lib/useAppRegistry";
 import { fetchSession, type SessionUser } from "./lib/auth";
 import { IdentityBanner, IdentityBannerSkeleton } from "./components/IdentityBanner";
 import { AppCard } from "./components/AppCard";
@@ -10,6 +11,7 @@ import { getRecentAppIds } from "./lib/recentApps";
 
 export default function App() {
   const [user, setUser] = useState<SessionUser | null | undefined>(undefined);
+  const { apps } = useAppRegistry();
   const [query, setQuery] = useState("");
   const [department, setDepartment] = useState<string | null>(null);
   const [recentIds] = useState<string[]>(() => getRecentAppIds());
@@ -20,10 +22,10 @@ export default function App() {
 
   const visibleApps = useMemo(
     () =>
-      appRegistry.filter(
+      (apps ?? []).filter(
         (a) => !a.hidden && (!a.requiresRole || user?.roles.includes(a.requiresRole)),
       ),
-    [user],
+    [apps, user],
   );
 
   const departments = useMemo(
@@ -104,7 +106,13 @@ export default function App() {
           </nav>
         </div>
 
-        {filteredApps.length === 0 ? (
+        {apps === undefined ? (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <Skeleton key={i} className="h-32 rounded-xl" />
+            ))}
+          </div>
+        ) : filteredApps.length === 0 ? (
           <EmptyState
             title="No apps match your search"
             description="Try a different search term or clear the department filter."

@@ -21,6 +21,8 @@ import { backchannelLogoutRouter } from "./routes/backchannelLogout.js";
 import { deniedRouter } from "./routes/denied.js";
 import { dataTokenRouter } from "./routes/dataToken.js";
 import { roleLookupRouter } from "./routes/roleLookup.js";
+import { appsRouter } from "./routes/apps.js";
+import { adminAppsRouter } from "./routes/adminApps.js";
 
 const app = express();
 app.use(cookieParser());
@@ -49,6 +51,8 @@ app.use(backchannelLogoutRouter);
 app.use(deniedRouter);
 app.use(dataTokenRouter);
 app.use(roleLookupRouter);
+app.use(appsRouter);
+app.use(adminAppsRouter);
 
 async function start() {
   await migrate();

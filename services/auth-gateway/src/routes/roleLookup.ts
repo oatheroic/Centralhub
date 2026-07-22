@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { requireSession, type AuthedRequest } from "../middleware/requireAdmin.js";
 import { resolveRoleCode } from "../attributes.js";
-import { KNOWN_APPS } from "../permissions.js";
+import { isKnownApp } from "../apps.js";
 
 // Role is JWT-resolved only (see apps/engineering's schema — there is no
 // user_roles table), so any in-app feature that needs to enumerate "which
@@ -21,7 +21,7 @@ roleLookupRouter.get(
   requireSession,
   async (req: AuthedRequest, res) => {
     const appId = req.params.appId as string;
-    if (!KNOWN_APPS.includes(appId)) {
+    if (!(await isKnownApp(appId))) {
       res.status(400).json({ error: `unknown app "${appId}"` });
       return;
     }

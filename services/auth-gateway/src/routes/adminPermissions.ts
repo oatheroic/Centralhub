@@ -5,9 +5,9 @@ import {
   getPermission,
   upsertPermission,
   bulkUpsertPermission,
-  KNOWN_APPS,
   type PermissionSet,
 } from "../permissions.js";
+import { isKnownApp } from "../apps.js";
 import { recordAudit } from "../audit.js";
 
 const VERBS: (keyof PermissionSet)[] = ["read", "write", "edit", "delete"];
@@ -29,7 +29,7 @@ adminPermissionsRouter.put(
   async (req: AuthedRequest, res) => {
     const userSub = req.params.userSub as string;
     const appId = req.params.appId as string;
-    if (!KNOWN_APPS.includes(appId)) {
+    if (!(await isKnownApp(appId))) {
       res.status(400).json({ error: `unknown app "${appId}"` });
       return;
     }
@@ -80,7 +80,7 @@ adminPermissionsRouter.put(
       appId: string;
       patch: Partial<PermissionSet>;
     }>;
-    if (!appId || !KNOWN_APPS.includes(appId)) {
+    if (!appId || !(await isKnownApp(appId))) {
       res.status(400).json({ error: `unknown app "${appId}"` });
       return;
     }

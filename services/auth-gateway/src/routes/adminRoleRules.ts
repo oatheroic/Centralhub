@@ -4,7 +4,7 @@ import {
   listAppRoleRules, createAppRoleRule, deleteAppRoleRule, listAttributeValues, resolveRoleCode,
   RoleRuleExistsError,
 } from "../attributes.js";
-import { KNOWN_APPS } from "../permissions.js";
+import { isKnownApp } from "../apps.js";
 import { recordAudit } from "../audit.js";
 
 // Generic per-app CRUD, not assets-specific — apps/assets's own admin panel
@@ -12,8 +12,8 @@ import { recordAudit } from "../audit.js";
 // "generic attributes -> app-specific vocabulary" need can reuse it as-is.
 export const adminRoleRulesRouter = Router();
 
-function checkKnownApp(appId: string, res: Response): boolean {
-  if (!KNOWN_APPS.includes(appId)) {
+async function checkKnownApp(appId: string, res: Response): Promise<boolean> {
+  if (!(await isKnownApp(appId))) {
     res.status(400).json({ error: `unknown app "${appId}"` });
     return false;
   }
@@ -26,7 +26,7 @@ adminRoleRulesRouter.get(
   requireAdmin,
   async (req, res) => {
     const appId = req.params.appId as string;
-    if (!checkKnownApp(appId, res)) return;
+    if (!(await checkKnownApp(appId, res))) return;
     try {
       res.json(await listAppRoleRules(appId));
     } catch (err) {
@@ -41,7 +41,7 @@ adminRoleRulesRouter.post(
   requireAdmin,
   async (req: AuthedRequest, res) => {
     const appId = req.params.appId as string;
-    if (!checkKnownApp(appId, res)) return;
+    if (!(await checkKnownApp(appId, res))) return;
     const { roleCode, department, position, jobLevel } = req.body as Partial<{
       roleCode: string;
       department: string | null;
@@ -106,7 +106,7 @@ adminRoleRulesRouter.get(
   requireAdmin,
   async (req, res) => {
     const appId = req.params.appId as string;
-    if (!checkKnownApp(appId, res)) return;
+    if (!(await checkKnownApp(appId, res))) return;
     try {
       const roleCode = await resolveRoleCode(req.params.userSub as string, appId);
       res.json({ roleCode });
@@ -122,7 +122,7 @@ adminRoleRulesRouter.delete(
   requireAdmin,
   async (req: AuthedRequest, res) => {
     const appId = req.params.appId as string;
-    if (!checkKnownApp(appId, res)) return;
+    if (!(await checkKnownApp(appId, res))) return;
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) {
       res.status(400).json({ error: "invalid rule id" });

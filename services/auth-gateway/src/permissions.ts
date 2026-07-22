@@ -1,12 +1,6 @@
 import { pool } from "./db.js";
 import { listUsers, findUserSubByUsername } from "./keycloakAdmin.js";
-
-// Hand-maintained, same pattern as docker-compose.yml's service list and
-// apps/central-hub/src/registry/apps.ts — update all three (plus the
-// README apps table) when adding a new app. Excludes central-hub (always
-// reachable once logged in) and admin (gated by the Keycloak `admin` role
-// instead of this table).
-export const KNOWN_APPS = ["marketing", "finance", "assets", "engineering"];
+import { listKnownAppIds } from "./apps.js";
 
 export type PermissionSet = {
   read: boolean;
@@ -40,6 +34,7 @@ export type PermissionMatrix = {
 
 export async function getMatrix(): Promise<PermissionMatrix> {
   const users = await listUsers();
+  const knownAppIds = await listKnownAppIds();
   const result = await pool.query<{
     user_sub: string;
     app_id: string;
@@ -52,7 +47,7 @@ export async function getMatrix(): Promise<PermissionMatrix> {
   const permissions: PermissionMatrix["permissions"] = {};
   for (const user of users) {
     permissions[user.id] = {};
-    for (const appId of KNOWN_APPS) {
+    for (const appId of knownAppIds) {
       permissions[user.id][appId] = DENY_ALL;
     }
   }
@@ -68,7 +63,7 @@ export async function getMatrix(): Promise<PermissionMatrix> {
 
   return {
     users: users.map((u) => ({ id: u.id, name: u.name, email: u.email })),
-    apps: KNOWN_APPS,
+    apps: knownAppIds,
     permissions,
   };
 }

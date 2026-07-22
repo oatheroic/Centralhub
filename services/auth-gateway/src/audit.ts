@@ -18,7 +18,10 @@ export type AuditAction =
   | "role_override.upsert"
   | "role_override.delete"
   | "attribute_value.rename"
-  | "attribute_value.delete";
+  | "attribute_value.delete"
+  | "app.create"
+  | "app.update"
+  | "app.delete";
 
 // sub is null for system-driven rows (login/role-sync-poller reconciling
 // Keycloak realm roles) — there's no admin actor to attribute those to.

@@ -92,10 +92,15 @@ CentralHub/
   2. Rename the `package.json` `name` field; set `base: "/apps/<name>/"` in
      `vite.config.ts`.
   3. Add a service entry to `environments/docker-compose.yml` (mirror `app-template`).
-  4. Add it to `apps/central-hub/src/registry/apps.ts` (dashboard card) and the
-     table in §9 below.
-  5. If it needs RBAC (§7), also add its id to `KNOWN_APPS` in
-     `services/auth-gateway/src/permissions.ts` and copy in `usePermissions.ts`.
+  4. Copy `app.manifest.json.example` to `app.manifest.json` and fill in
+     `name`/`department`/`icon`/`description` — the next `pnpm stack:up`
+     registers it automatically (dashboard card, plus `KNOWN_APPS`-style
+     permission-matrix participation) via auth-gateway's `apps` table, no
+     file edit needed. See §13's "Postgres-backed dynamic app registry" for
+     the full mechanism, and `apps/admin`'s "Apps" tab to edit/hide/override
+     a row afterward.
+  5. Copy in `usePermissions.ts` if it needs RBAC (§7) — no separate
+     `KNOWN_APPS` edit anymore, that's covered by step 4's manifest.
   - **No Nginx changes needed** for any of the above — see Pillar 2.
 
 ---
@@ -111,10 +116,14 @@ CentralHub/
   tiny per-app Nginx image, keeping routing decoupled from app internals.
 - **Status**: done, stable since Phase 1; extended in Phase 4 with the
   per-app permission gate (§7).
-- **Component discovery** (`apps/central-hub/src/registry/apps.ts`): the
-  dashboard is driven by a single static, file-based registry (id, name,
-  department, icon, URL) — no backend call. Clicking a card just navigates;
-  the real session cookie (§6) travels automatically on same-origin nav.
+- **Component discovery**: the dashboard's card list (id, name, department,
+  icon, description) is fetched once from auth-gateway's `GET /auth/apps`
+  (see §13's dynamic app registry) rather than a static file — a real,
+  intentional change from earlier phases' "no backend call" dashboard,
+  shown with a brief skeleton grid while it loads. Clicking a card still
+  just navigates by convention (`id === "central-hub" ? "/" :
+  "/apps/<id>/"`); the real session cookie (§6) travels automatically on
+  same-origin nav.
 
 ---
 
@@ -249,10 +258,15 @@ CentralHub/
   | `dev-user` | read, write | *(nothing — demonstrates the denied page)* |
 
 - **Wiring a new app into this scheme** (in addition to Pillar 1's checklist):
-  1. Add the app's id to `KNOWN_APPS` in `services/auth-gateway/src/permissions.ts`.
+  1. Nothing to do here anymore — copying in `app.manifest.json` (Pillar 1,
+     step 4) registers the app with `knownApp: true` by default, which is
+     what used to require a manual `KNOWN_APPS` edit in
+     `services/auth-gateway/src/permissions.ts`. Flip it off from
+     `apps/admin`'s Apps tab if an app should exist on the dashboard but
+     never participate in the permission matrix.
   2. Copy `apps/_template/src/lib/usePermissions.ts` into the new app, set `APP_ID`.
   3. Wrap mutating handlers with `useGuardedAction(permissions, verb, handler)`
-     — read-gating is automatic once the id is in `KNOWN_APPS`.
+     — read-gating is automatic once the app is registered.
 - **Implementation notes / gotchas already resolved**:
   - The internal `/internal/verify` Nginx location originally declared
     `set $app_id '';` at `server` scope so the header always had *some* value.
@@ -1257,16 +1271,17 @@ first pass, caught only in a dedicated cleanup afterward):
 | App | Package | URL | Purpose |
 |---|---|---|---|
 | `apps/_template` | `@apps/template` | `/apps/_template/` | Starting point to copy when scaffolding a new app; demonstrates calling `/api/inference/health`. |
-| `apps/central-hub` | `@apps/central-hub` | `/` (gateway root) | Landing dashboard; discovers apps via `src/registry/apps.ts`, shows the real logged-in user via `/auth/me`. |
+| `apps/central-hub` | `@apps/central-hub` | `/` (gateway root) | Landing dashboard; discovers apps via `GET /auth/apps` (§12b's dynamic registry), shows the real logged-in user via `/auth/me`. |
 | `apps/marketing` | `@apps/marketing` | `/apps/marketing/` | Placeholder department app; demo RBAC-guarded "Save campaign" action. |
 | `apps/finance` | `@apps/finance` | `/apps/finance/` | Placeholder department app; demo RBAC-guarded "Approve budget" action. |
 | `apps/admin` | `@apps/admin` | `/apps/admin/` | Keycloak user list (with a per-user "Revoke session" action, §8, now confirm-gated, §9) + permissions matrix editor (§7). Linked from `central-hub`'s landing grid only for users holding the `admin` role (§9) — that's a discoverability nicety, not the real protection: the `admin`-role Nginx gate is what actually stops access. |
 | `apps/assets` | `@apps/assets` | `/apps/assets/` | First third-party/self-hosted app (§10) — asset purchase requests, registration, transfers; its own Postgres/PostgREST/storage-api, no external SaaS dependency. |
 | `apps/engineering` | `@apps/engineering` | `/apps/engineering/` | Second third-party/self-hosted app (§10b) — machine repair job workflow (report/assign/repair/review); its own Postgres/PostgREST/storage-api, no external SaaS dependency. |
 
-This table is maintained by hand alongside `apps/central-hub/src/registry/apps.ts`
-and `services/auth-gateway/src/permissions.ts`'s `KNOWN_APPS` — update all three
-when adding or removing an app.
+This table itself is still maintained by hand (it's prose, not the registry) —
+but the dashboard entry, permission-matrix participation, and admin role-code
+guarantee it used to require three separate file edits for are now sourced
+live from auth-gateway's `apps` table; see §12b.
 
 ---
 
@@ -1281,6 +1296,95 @@ when adding or removing an app.
 - **Status**: done, stable since Phase 1.
 - **To switch**: set `INFERENCE_PROVIDER=local` and `LOCAL_MODEL_BASE_URL` in
   `environments/.env` — no app or gateway code changes.
+
+---
+
+## 12b. Dynamic app registry
+
+- **Objective**: registering a new app (or editing an existing one's
+  dashboard metadata) shouldn't require hand-editing three independent,
+  drift-prone lists — `apps/central-hub/src/registry/apps.ts`'s static
+  array, `services/auth-gateway/src/permissions.ts`'s `KNOWN_APPS`
+  constant, and `attributes.ts`'s `CENTRALHUB_ADMIN_ROLE_CODE` map — every
+  time. This was §13's longest-standing deferred item; closed for the
+  touchpoints that are genuinely *metadata*, not infrastructure.
+- **Architecture**: a new `apps` table in auth-gateway's Postgres (see
+  `db.ts`) is now the single source of truth. Each app folder can carry an
+  `app.manifest.json` (`name`/`department`/`icon`/`description`/`hidden`/
+  `requiresRole`) — a new one-shot `apps-manifest-sync` compose service
+  (`scripts/sync-app-manifests.mjs`) reads every `apps/*/app.manifest.json`
+  on each `docker compose up` and registers it via
+  `POST /internal/apps/sync` (server-to-server only, same posture as
+  `/backchannel-logout`), **insert-if-absent only** — it never overwrites a
+  row an admin has since edited, the same "don't fight an admin's own
+  change" rule §8's `seedRoleRulesIfEmpty()` already established. Only
+  `central-hub` and `admin` are pre-seeded manually in `db.ts` (both are
+  platform-internal, never a "real" app someone deploys via the manifest
+  flow); `marketing`/`finance`/`assets`/`engineering` register themselves
+  via their own manifests, so their `source` column correctly reads
+  `manifest`, not `manual`. `apps/central-hub`'s dashboard now fetches
+  `GET /auth/apps` instead of importing a static array (a real, intentional
+  change from the earlier "no backend call" dashboard — see §4); `apps/admin`
+  gained an "Apps" tab for full CRUD, with a visual icon picker (a curated
+  Lucide icon grid, `IconPicker.tsx`) instead of a free-text icon-name
+  field, a per-row reachability check, and flag badges (hidden/role/
+  admin-role/not-permission-gated/source) each given their own tone rather
+  than uniform gray, so a scan of the table reads at a glance.
+- **Security boundary**: a manifest can only set cosmetic/discovery fields.
+  `known_app` (permission-matrix participation, ex-`KNOWN_APPS`) and
+  `admin_role_code` (the "guaranteed CentralHub admin" override,
+  ex-`CENTRALHUB_ADMIN_ROLE_CODE`) are admin-UI/API-only — a manifest is
+  app-supplied config (including from a third-party ingestion, §10/§10b),
+  and letting it silently affect platform authorization would be a real
+  privilege-escalation surface. Both default safely (`known_app: true`,
+  `admin_role_code: null`); `assets`/`engineering` get theirs back from a
+  small code-owned `DEV_DEFAULT_ADMIN_ROLE_CODES` map in `apps.ts`, applied
+  exactly once at the moment the manifest sync first creates that app's
+  row (never on a later sync), so an admin who later clears it via the
+  Apps tab stays cleared rather than having it silently resurrected.
+- **Explicitly still manual, by design, not an oversight**:
+  `environments/docker-compose.yml`'s per-app service block and
+  `gateway/conf.d/default.conf`'s app-specific blocks (the `admin` role
+  gate, `assets`/`engineering`'s data-API proxy paths) — containers must
+  exist before the stack starts, and Nginx's plain static-frontend routing
+  was already zero-edit per app (see Pillar 2); nothing here changes that
+  boundary. Registering an app's metadata and actually deploying it remain
+  two separate, independently-orderable steps.
+- **Found via live testing, both fixed**:
+  - The reachability check first shipped using a `HEAD` request and
+    treating any 2xx as "Reachable" — but Nginx's `error_page 403 =
+    @permission_denied` (see §7) comes back as a plain HTTP 200 rendering
+    the denial page's body, not a distinguishable status code. An admin
+    checking a freshly-registered app they had no `app_permissions` row
+    for (deny-all default) saw it misreported as "Reachable" even though
+    no container existed. Fixed by switching to `GET` and inspecting the
+    response body for each page's own marker text (`"You don't have
+    access to this app"` vs. the new unavailable page's copy below) — the
+    same technique `scripts/test-stack.mjs` already used for exactly this
+    Nginx gotcha.
+  - A permission-*granted* user hitting an app with no container got a raw
+    Nginx 502 — ugly, and indistinguishable from a real outage. Added a
+    second styled page (`appUnavailablePage.ts`, `GET /unavailable`,
+    mirroring the access-denied page's look) and a new `@app_unavailable`
+    named Nginx location, wired via `error_page 502 504` (plus
+    `proxy_intercept_errors on`, required for `error_page` to catch a real
+    proxied error response rather than one Nginx generates itself) on both
+    page-serving app locations — the generic `/apps/<name>/` block and the
+    `/apps/admin/` block. Data-API proxy blocks (PostgREST/storage, §10)
+    are deliberately untouched — those are `fetch()`-called API surfaces,
+    not browser navigation, so a bare 502 is the right shape there, same
+    reasoning as `/api/inference/`'s bare-401 policy.
+  - The audit log's `app.update` entries only ever showed the row's
+    current name/department, identical to `app.create` — no way to tell
+    *what* an edit actually changed. Fixed the same way
+    `permission.update`/`attribute.update` already do: the PUT route now
+    records a `{ before, after }` pair, and the admin UI diffs every field
+    for display.
+- **Status**: done — backend CRUD, manifest sync (including the four
+  non-platform apps), the central-hub dashboard switch, the admin Apps tab
+  (icon picker, reachability check, styled flag badges), the friendly
+  unavailable page, and audit diffing are all in place, verified against a
+  live rebuilt stack, and covered by `scripts/test-stack.mjs`'s §6c.
 
 ---
 
@@ -1321,7 +1425,6 @@ specific to `apps/engineering` (§10b), then everything else.
 | Per-session (`jti`) tracking / "your active sessions" UI | `session_revocations` table design | Current granularity is per-user (kill all sessions), not per-device — see §8 |
 | Production-safe credentials | `keycloak/realm-export.json`, `.env` | `dev-admin`/`dev-user`/client secret are dev-only seed data — see §6, §7 |
 | `usePermissions.ts`'s `window.alert()` → toast | `apps/_template`, `apps/marketing`, `apps/finance` | Duplicated across 3 files by design (§9); a real fix needs extracting the hook into `packages/ui` first, out of scope for §9's UI-primitives pass |
-| Postgres-backed dynamic app registry | replacing `apps.ts`/`KNOWN_APPS`/`docker-compose.yml`'s static lists | Deferred per §10 — not a prerequisite for onboarding one real third-party app |
 | Replace app-local department vocabularies with CentralHub's official `attribute_values` list directly, retiring alias/mapping tables | `apps/engineering`'s own `departments` table (and `DeptAliasSection`'s mapping into it); the equivalent for `apps/assets`'s department-shaped demo data (`cc_recipient`/`recipient`) | `apps/engineering`'s `departments` is a real FK'd entity (machines, repair jobs, profiles reference `department_id`), so collapsing it onto `attribute_values` means either migrating those FKs to reference names directly or a synced mirror table — materially larger than the CRUD/dropdown work above, which only touched the CentralHub-side picker, not each app's own department model |
 
 ---

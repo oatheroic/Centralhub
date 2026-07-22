@@ -165,6 +165,50 @@ export async function migrate(): Promise<void> {
       ('job_level', 'Junior')
     ON CONFLICT (kind, value) DO NOTHING;
   `);
+  // Single source of truth for "what apps exist" — replaces the old
+  // hand-maintained trio (apps/central-hub/src/registry/apps.ts's static
+  // array, this file's own former KNOWN_APPS constant, attributes.ts's
+  // former CENTRALHUB_ADMIN_ROLE_CODE map). `source` distinguishes a row
+  // auto-created by an app's own app.manifest.json (see apps.ts's
+  // upsertFromManifest()) from one an admin created/edited by hand — purely
+  // informational, nothing branches on it besides the admin UI's display.
+  // known_app/admin_role_code are deliberately NOT settable by a manifest
+  // (see apps.ts) — they affect real authorization (permission-matrix
+  // membership, the "guaranteed CentralHub admin" role-code override), so
+  // only the admin UI/API can set them, never app-supplied config.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS apps (
+      id              TEXT PRIMARY KEY,
+      name            TEXT NOT NULL,
+      department      TEXT NOT NULL,
+      icon            TEXT NOT NULL DEFAULT 'LayoutGrid',
+      description     TEXT,
+      hidden          BOOLEAN NOT NULL DEFAULT false,
+      requires_role   TEXT,
+      known_app       BOOLEAN NOT NULL DEFAULT true,
+      admin_role_code TEXT,
+      source          TEXT NOT NULL DEFAULT 'manual'
+    );
+  `);
+  // Only seeds central-hub and admin manually — both are platform-internal
+  // (never a "real" department app someone deploys via the manifest flow;
+  // central-hub is always reachable once logged in, admin is gated by the
+  // Keycloak role, not this table's knownApp flag) and both need a flag
+  // (hidden / requiresRole+known_app=false) a plain manifest sync leaves at
+  // its default. Every other app (marketing/finance/assets/engineering)
+  // is deliberately NOT seeded here — it registers itself via its own
+  // app.manifest.json through the apps-manifest-sync one-shot service (see
+  // apps.ts's upsertFromManifest()), so `source` correctly reads
+  // 'manifest' for them instead of 'manual'. ON CONFLICT DO NOTHING means
+  // this never overwrites an admin's later edits — same "seed once, never
+  // fight an admin's own change" rule as attribute_values/app_role_rules
+  // above.
+  await pool.query(`
+    INSERT INTO apps (id, name, department, icon, description, hidden, requires_role, known_app, admin_role_code) VALUES
+      ('central-hub', 'Central Hub', 'Platform', 'LayoutGrid', NULL, true, NULL, false, NULL),
+      ('admin', 'Admin', 'Platform', 'ShieldCheck', 'Manage users, permissions, and sessions.', false, 'admin', false, NULL)
+    ON CONFLICT (id) DO NOTHING;
+  `);
   // Append-only history of admin-initiated (and system role-sync) changes —
   // see audit.ts. actor_sub is NULL for system-driven rows (login/poller
   // role sync has no admin actor); target_name/app_id are denormalized at

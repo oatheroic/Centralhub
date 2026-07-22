@@ -13,6 +13,7 @@ import {
 } from "@centralhub/ui";
 import { AttributeSelect } from "./components/AttributeSelect";
 import { AttributeValueManagerDialog } from "./components/AttributeValueManagerDialog";
+import { AppsPanel } from "./components/AppsPanel";
 
 type AdminUser = {
   id: string;
@@ -650,6 +651,21 @@ function summarizeAuditDetail(row: AuditRow): string {
       return `Rule added: ${detail.roleCode ?? ""}`;
     case "role_rule.delete":
       return `Rule removed: ${detail.roleCode ?? `(id ${detail.id ?? "?"})`}`;
+    case "app.create":
+      return `${detail.name ?? row.appId} (${detail.department ?? "?"})`;
+    case "app.update": {
+      const fields = [
+        "name", "department", "icon", "description", "hidden", "requiresRole", "knownApp", "adminRoleCode",
+      ] as const;
+      const before = detail.before ?? {};
+      const after = detail.after ?? {};
+      const changes = fields
+        .filter((f) => before[f] !== after[f])
+        .map((f) => `${f}: ${before[f] ?? "(none)"} → ${after[f] ?? "(none)"}`);
+      return changes.length > 0 ? changes.join(", ") : "no change";
+    }
+    case "app.delete":
+      return `${detail.name ?? row.appId ?? "unknown"} removed`;
     default:
       return JSON.stringify(detail);
   }
@@ -663,6 +679,9 @@ const ACTION_LABELS: Record<string, string> = {
   "attribute.update": "Attribute",
   "role_rule.create": "Role rule added",
   "role_rule.delete": "Role rule removed",
+  "app.create": "App created",
+  "app.update": "App updated",
+  "app.delete": "App deleted",
 };
 
 function AuditPanel() {
@@ -743,7 +762,7 @@ function AuditPanel() {
   );
 }
 
-type Tab = "users" | "permissions" | "audit";
+type Tab = "users" | "permissions" | "apps" | "audit";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("users");
@@ -763,6 +782,9 @@ export default function App() {
             >
               Permissions
             </Button>
+            <Button variant={tab === "apps" ? "primary" : "secondary"} onClick={() => setTab("apps")}>
+              Apps
+            </Button>
             <Button variant={tab === "audit" ? "primary" : "secondary"} onClick={() => setTab("audit")}>
               Audit
             </Button>
@@ -770,7 +792,15 @@ export default function App() {
         }
       >
         <div className="space-y-10">
-          {tab === "users" ? <UsersPanel /> : tab === "permissions" ? <PermissionsPanel /> : <AuditPanel />}
+          {tab === "users" ? (
+            <UsersPanel />
+          ) : tab === "permissions" ? (
+            <PermissionsPanel />
+          ) : tab === "apps" ? (
+            <AppsPanel />
+          ) : (
+            <AuditPanel />
+          )}
         </div>
       </AppShell>
     </ToastProvider>

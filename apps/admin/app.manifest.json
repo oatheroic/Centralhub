@@ -1,0 +1,7 @@
+{
+  "name": "Admin",
+  "department": "Platform",
+  "icon": "ShieldCheck",
+  "description": "Manage users, permissions, and sessions.",
+  "requiresRole": "admin"
+}

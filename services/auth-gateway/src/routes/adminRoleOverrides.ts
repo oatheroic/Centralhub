@@ -1,10 +1,10 @@
 import { Router, type Response } from "express";
 import { requireSession, requireAdmin, type AuthedRequest } from "../middleware/requireAdmin.js";
 import {
-  listAppRoleOverrides, upsertAppRoleOverride, deleteAppRoleOverride, guaranteedAdminRoleCodeFor,
+  listAppRoleOverrides, upsertAppRoleOverride, deleteAppRoleOverride,
 } from "../attributes.js";
 import { hasRole } from "../roles.js";
-import { KNOWN_APPS } from "../permissions.js";
+import { isKnownApp, adminRoleCodeFor } from "../apps.js";
 import { recordAudit } from "../audit.js";
 
 // Generic per-app CRUD, mirroring adminRoleRules.ts exactly — a per-user
@@ -13,8 +13,8 @@ import { recordAudit } from "../audit.js";
 // using the attributes -> role_code pattern gets this for free.
 export const adminRoleOverridesRouter = Router();
 
-function checkKnownApp(appId: string, res: Response): boolean {
-  if (!KNOWN_APPS.includes(appId)) {
+async function checkKnownApp(appId: string, res: Response): Promise<boolean> {
+  if (!(await isKnownApp(appId))) {
     res.status(400).json({ error: `unknown app "${appId}"` });
     return false;
   }
@@ -27,7 +27,7 @@ adminRoleOverridesRouter.get(
   requireAdmin,
   async (req, res) => {
     const appId = req.params.appId as string;
-    if (!checkKnownApp(appId, res)) return;
+    if (!(await checkKnownApp(appId, res))) return;
     try {
       res.json(await listAppRoleOverrides(appId));
     } catch (err) {
@@ -42,7 +42,7 @@ adminRoleOverridesRouter.post(
   requireAdmin,
   async (req: AuthedRequest, res) => {
     const appId = req.params.appId as string;
-    if (!checkKnownApp(appId, res)) return;
+    if (!(await checkKnownApp(appId, res))) return;
     const { userSub, roleCode } = req.body as Partial<{ userSub: string; roleCode: string }>;
     if (!userSub?.trim() || !roleCode?.trim()) {
       res.status(400).json({ error: "userSub and roleCode are required" });
@@ -61,13 +61,13 @@ adminRoleOverridesRouter.post(
       res.status(400).json({ error: "cannot set a role override on your own account" });
       return;
     }
-    // For an app opted into CENTRALHUB_ADMIN_ROLE_CODE (attributes.ts), a
+    // For an app with apps.ts's adminRoleCode set (admin-managed), a
     // CentralHub Keycloak admin's role_code there is absolute — an override
     // targeting one would be accepted but silently never take effect
     // (resolveRoleCode() never reaches the overrides table for them at
     // all). Reject at write time rather than let an admin believe a dead
     // override worked.
-    const guaranteedAdminRoleCode = guaranteedAdminRoleCodeFor(appId);
+    const guaranteedAdminRoleCode = await adminRoleCodeFor(appId);
     if (guaranteedAdminRoleCode && (await hasRole(userSub, "admin"))) {
       res.status(400).json({
         error: "this user is a CentralHub admin — their role here is always \"" + guaranteedAdminRoleCode + "\", an override would never take effect",
@@ -97,7 +97,7 @@ adminRoleOverridesRouter.delete(
   requireAdmin,
   async (req: AuthedRequest, res) => {
     const appId = req.params.appId as string;
-    if (!checkKnownApp(appId, res)) return;
+    if (!(await checkKnownApp(appId, res))) return;
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) {
       res.status(400).json({ error: "invalid override id" });

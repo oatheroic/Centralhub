@@ -21,6 +21,7 @@ services:
     depends_on:
       - inference-gateway
       - auth-gateway
+      - apps-manifest-sync
       - app-template
       - app-central-hub
       - app-marketing
@@ -120,6 +121,24 @@ services:
     depends_on:
       - keycloak
       - db
+    networks:
+      - centralhub
+
+  # --- One-shot: reads every apps/<name>/app.manifest.json and registers it
+  # with auth-gateway's apps table (POST /internal/apps/sync, insert-if-
+  # absent — never overwrites an admin's later edit). Read-only bind mount,
+  # never touches app source; see scripts/sync-app-manifests.mjs and
+  # README's "Postgres-backed dynamic app registry" section.
+  apps-manifest-sync:
+    build:
+      context: ..
+      dockerfile: scripts/sync-app-manifests.Dockerfile
+    environment:
+      AUTH_GATEWAY_URL: http://auth-gateway:4100
+    volumes:
+      - ../apps:/manifests:ro
+    depends_on:
+      - auth-gateway
     networks:
       - centralhub
 
