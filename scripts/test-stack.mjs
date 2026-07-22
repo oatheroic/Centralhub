@@ -641,6 +641,34 @@ async function main() {
   // -- 9. apps/engineering: data-token, role_code, RLS, provisioning,       --
   // -- department_user_overrides, resolve-role/role-codes lookups (§10b) --
   section("9. apps/engineering — data-token, role resolution, RLS, ensure_profile, department overrides");
+
+  // Ensure the generic Staff/Junior -> repairer demo rule exists before
+  // asserting on it, rather than asserting on whatever happens to be
+  // configured. seedRoleRulesIfEmpty() (attributes.ts) only ever seeds an
+  // app's rules once, while it has zero rules at all -- once a live admin
+  // session has edited engineering's rules even once (see README's
+  // engineering ingestion section: "dev-user's own generic rule got
+  // replaced by a more specific department-scoped one during live
+  // testing"), nothing re-creates a missing generic rule automatically.
+  // Idempotent (a 409 from an already-existing identical rule is
+  // expected, not a failure) and non-destructive -- this only ever adds
+  // the one rule the suite itself depends on, never touching or removing
+  // any other rule a live session may have added (e.g. a department-
+  // scoped repairer rule sits alongside this one harmlessly, since it
+  // simply won't match dev-user's Purchasing department).
+  await must("engineering has its generic Staff/Junior -> repairer demo rule (self-healing setup)", async () => {
+    const res = await getJson(admin, `${GATEWAY}/auth/admin/apps/engineering/role-rules`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ roleCode: "repairer", department: null, position: "Staff", jobLevel: "Junior" }),
+    });
+    ok(
+      "POST engineering role-rules (repairer demo rule) -> 201 (created) or 409 (already present)",
+      res.status === 201 || res.status === 409,
+      JSON.stringify(res.body),
+    );
+  });
+
   let engAdminToken, engUserToken;
   await must("data-token mints for both users, resolving the seeded role_code", async () => {
     const adminData = await getJson(admin, `${GATEWAY}/auth/data-token?app=engineering`);

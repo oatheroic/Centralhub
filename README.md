@@ -1599,7 +1599,15 @@ All fixed:
    post-fix — not a regression, just no more auto-repair. Restored the
    generic rule by hand and the suite is back to green; see §13's new
    multi-department row for the related root cause of why that rule got
-   replaced in the first place.)
+   replaced in the first place. **Update, a later session**: restoring it
+   by hand only fixed that one run — the same live-testing-driven drift
+   (§12b's Warehouse test app, engineering's role rules) recurred, and
+   would keep recurring indefinitely now that there's no auto-repair.
+   `scripts/test-stack.mjs`'s own §9 now seeds this exact demo rule itself
+   (idempotent POST, tolerates a 409 if already present) right before
+   asserting on it, instead of asserting on whatever a prior live-testing
+   session left behind — the fix belongs in the test's own setup, not in
+   remembering to hand-restore DB state after every live-test pass.)
 4. **Keycloak's own plumbing roles leaked into every role display**:
    `offline_access`, `uma_authorization`, and `default-roles-<realm>` are
    auto-granted to every Keycloak user and were flowing straight through
