@@ -1,16 +1,16 @@
-import { useState } from "react";
-import { ArrowLeft, Wrench, Moon, Sun } from "lucide-react";
+import { ArrowLeft, Wrench } from "lucide-react";
+import { ThemeToggle } from "@centralhub/ui";
 import { useAuth } from "@/hooks/useAuth";
 import { ROLE_LABEL } from "@/lib/auth-utils";
-import { getStoredTheme, setStoredTheme, type Theme } from "@centralhub/ui/theme";
 import "@centralhub/ui/tokens.css";
 
-// Deliberately hand-authored, not an import of packages/ui's compiled
-// AppShell — this app's React 19 / Tailwind v4 stack stays as-is (peer dep
-// conflict with packages/ui's React ^18.3.1, same as apps/assets). Only
-// tokens.css and the React-free @centralhub/ui/theme subpath are shared,
-// so this one chrome element reads as CentralHub. No logout button here —
-// logout is CentralHub's job (§6/§7), not something this app duplicates.
+// Not an import of packages/ui's compiled AppShell — this app's Tailwind
+// v4/shadcn stack stays as-is (see README's third-party app ingestion
+// section), so the header layout below is still hand-authored. The theme
+// toggle itself is the real shared `packages/ui` component (widened peer
+// range now supports React 19), not a re-implementation. No logout button
+// here — logout is CentralHub's job (§6/§7), not something this app
+// duplicates.
 //
 // Layout matches every other app's chrome (packages/ui's AppShell,
 // AssetsNav): "← Central Hub" leftmost, paired with the app title; only
@@ -18,13 +18,6 @@ import "@centralhub/ui/tokens.css";
 // the right instead — inconsistent with the rest of the repo, fixed here.
 export function AppHeader({ subtitle }: { subtitle?: string }) {
   const { profile, role } = useAuth();
-  const [theme, setTheme] = useState<Theme>(() => getStoredTheme());
-
-  function toggleTheme() {
-    const next: Theme = theme === "dark" ? "light" : "dark";
-    setStoredTheme(next);
-    setTheme(next);
-  }
 
   return (
     <header className="border-b bg-card/80 backdrop-blur sticky top-0 z-30">
@@ -49,15 +42,7 @@ export function AppHeader({ subtitle }: { subtitle?: string }) {
             </div>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={toggleTheme}
-          aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-          title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-foreground"
-        >
-          {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
-        </button>
+        <ThemeToggle />
       </div>
     </header>
   );

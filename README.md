@@ -555,17 +555,27 @@ first- vs. third-party by fiat**.
     before dark applies. `packages/ui`'s `ThemeToggle` (Sun/Moon icon
     button, built on the same `theme.ts`) sits at the top-right of
     `AppShell`'s header (admin/marketing/finance/`_template`) and of
-    `central-hub`'s own bespoke header. `apps/assets` can't import
-    `ThemeToggle` itself — its React 19 vs. this package's React
-    ^18.3.1 peer dep, same reason `AssetsNav.tsx` hand-authors its own
-    chrome instead of importing `AppShell` — so `theme.ts` is also
-    published as its own React-free `@centralhub/ui/theme` subpath export,
-    and `AssetsNav.tsx` hand-authors a matching toggle button at its own
-    top-right, styled with the same shared CSS tokens the rest of its nav
-    already uses. `apps/assets`'s own `styles.css` already shipped a full
-    shadcn `.dark` palette from the original Lovable export — unused until
-    now, since nothing ever toggled the class; no CSS changes were needed
-    there, only the toggle.
+    `central-hub`'s own bespoke header. `packages/ui`'s peer range was
+    later widened to `^18.3.1 || ^19.0.0` (Radix's own peer ranges already
+    supported React 19 — verified via `npm view`), so `apps/assets` and
+    `apps/engineering` now import the real `ThemeToggle` component instead
+    of hand-authoring a duplicate — see §10/§10b. `AppShell` itself is
+    still not imported by either app: its own Tailwind v4/shadcn stack
+    stays as-is, so `AssetsNav.tsx`/`AppHeader.tsx` remain hand-authored
+    header layouts, just with a shared toggle button inside them. Making
+    `ThemeToggle`'s classes (`text-text-muted`, `hover:bg-border`, etc.)
+    actually resolve required two small additions per app: an
+    `@source "../../../packages/ui/src"` line in `styles.css` (Tailwind v4's
+    `source(none)` mode only scans explicitly declared paths, so a
+    workspace package's own source is otherwise invisible to it) and a
+    `--color-text`/`--color-text-muted` alias in the `@theme inline` block
+    mapping to each app's existing `--foreground`/`--muted-foreground`
+    variables (packages/ui's components use chub's own token names, which
+    don't exist natively in either app's shadcn-derived theme). `apps/assets`'s
+    own `styles.css` already shipped a full shadcn `.dark` palette from the
+    original Lovable export — unused until now, since nothing ever toggled
+    the class; no further CSS changes were needed there, only the toggle
+    and the alias above.
   - **Space efficiency**: `AppShell`'s content area, and `central-hub`'s own
     equivalent container, were hard-capped at `max-w-5xl` (1024px)
     regardless of viewport — wasted room on any screen wider than a small
@@ -631,11 +641,18 @@ first- vs. third-party by fiat**.
     privileged server-side logic worth preserving, and the app's one SSR
     route added nothing beyond proxying an already-public storage object.
   - Design system: kept its own Tailwind v4/shadcn/React 19 stack internally
-    (its React peer would conflict with `packages/ui`'s `^18.3.1`) — only
-    `AssetsNav` (`apps/assets/src/components/AssetsNav.tsx`) shares chrome
-    with the rest of the hub, by importing `packages/ui/src/tokens.css`
-    directly (plain CSS custom properties, framework-agnostic) rather than
-    any compiled component.
+    — `packages/ui`'s peer range was later widened to
+    `^18.3.1 || ^19.0.0` (see §9), so the conflict that originally
+    justified this is gone, but a full `AppShell` adoption still isn't
+    worth doing: this app's chrome (nav layout, Tailwind v4 CSS-first
+    theme) is structurally different enough that only genuinely identical
+    pieces are shared. `AssetsNav`
+    (`apps/assets/src/components/AssetsNav.tsx`) imports
+    `packages/ui/src/tokens.css` directly (plain CSS custom properties,
+    framework-agnostic) for its own hand-authored layout, plus the real
+    `ThemeToggle` component (see §9's note on the `@source`/color-alias
+    plumbing that made importing it actually render correctly) — not a
+    hand-rolled duplicate.
   - Registry: wired in via the existing static lists (`apps.ts`,
     `KNOWN_APPS`, `docker-compose.yml`) — a Postgres-backed dynamic registry
     remains a deferred, separate future phase (see §13), not a prerequisite
@@ -1532,14 +1549,70 @@ pnpm stack:up
 For whoever (human or agent) picks this repo up next — what changed most
 recently, and where to look first.
 
-**What just happened**: fixed a real regression reported against
-`apps/engineering`'s หัวหน้าสังกัด (`leader`) role — after ingestion, an
-admin could no longer directly assign a specific user to lead a specific
-department the way the original (pre-ingestion) app allowed, and even once
-the generic `dept_name` → `department_aliases` mapping was configured, the
-leader's landing page stayed blank with no error. See §10b's "Role &
-department mapping" subsection (now extended) for the full root-cause
-writeup. Two bugs, both fixed:
+**What just happened**: fixed the React-version-driven UI fragmentation
+between first-party apps and the two third-party ingestions
+(`apps/assets`, `apps/engineering`) — see §9's `ThemeToggle` note and
+§10/§10b's design-system bullets (now updated) for the full writeup.
+Summary: `packages/ui`'s peer range was pinned to React `^18.3.1`, which is
+why both third-party apps (React 19) hand-authored their own duplicate
+theme-toggle button instead of importing the shared `ThemeToggle`
+component. Widened the range to `^18.3.1 || ^19.0.0` in
+`packages/ui/package.json` (verified via `npm view` that the two Radix
+packages it depends on already support React 19) and `pnpm install`'d —
+this also fixed `apps/engineering` having no importer entry in
+`pnpm-lock.yaml` at all, a pre-existing staleness independent of this fix.
+
+Importing the real `ThemeToggle` into `AssetsNav.tsx`/`AppHeader.tsx`
+wasn't enough on its own, though — found by actually building and grepping
+the compiled CSS, not just reasoning about it. Both apps' Tailwind v4 setup
+uses `@import "tailwindcss" source(none)`, which means Tailwind *only*
+scans paths an app explicitly lists via `@source` — `packages/ui`'s own
+source directory was invisible to it, so `ThemeToggle`'s classes
+(`text-text-muted`, `hover:bg-border`, etc.) silently compiled to nothing.
+Fixed per-app with an `@source "../../../packages/ui/src"` line plus a
+`--color-text`/`--color-text-muted` alias in each app's `@theme inline`
+block (mapping to its existing `--foreground`/`--muted-foreground`
+variables — `packages/ui`'s components use chub's own token names, which
+don't exist natively in either app's shadcn-derived theme). Verified by
+grepping the built CSS for the generated rules
+(`.text-text-muted{color:var(--muted-foreground)}` etc.) before trusting
+it, then confirmed live: rebuilt/restarted `app-assets`/`app-engineering`
+against the running stack, logged in as `dev-admin` via a real Keycloak
+flow (headless Chromium, no chromium-cli available in this environment so
+drove it directly with Playwright), and screenshotted the toggle across
+`central-hub`/`admin`/`assets`/`engineering` in both themes — pixel-
+consistent icon, size, and hover color everywhere.
+
+**A planned second half of this fix was deliberately dropped**: also
+migrating `apps/engineering`'s local `ConfirmDialog.tsx` wrapper onto
+`packages/ui`'s version. Blocked by a real token-naming collision, not a
+mechanical peer-dep issue: `packages/ui`'s `Button` "primary" variant uses
+`bg-accent`/`text-accent-fg`, and `apps/engineering`'s own shadcn
+primitives already define `--color-accent`/`--color-accent-foreground`
+natively for an unrelated purpose — a subtle hover-highlight color used by
+its calendar, command palette, dropdown/context menus, and more. Aliasing
+`--color-accent` to chub's bold brand color (the same trick that worked
+for `--color-text`) would have repainted all of those existing hover
+states. Left the local wrapper in place; confirmed via a live screenshot
+(triggering `AdminPage.tsx`'s job-delete dialog, both themes) that it
+still renders correctly, unaffected by the peer-range widen.
+
+**Files touched this session**: `packages/ui/package.json`,
+`pnpm-lock.yaml`, `apps/assets/src/components/AssetsNav.tsx`,
+`apps/assets/src/styles.css`, `apps/engineering/src/components/AppHeader.tsx`,
+`apps/engineering/src/styles.css`, this README. No database migrations, no
+backend changes — purely a frontend build/styling fix. `apps/admin` was
+built locally (not modified) to confirm the widened peer range doesn't
+disturb React 18 apps.
+
+**Older handoff, preserved below for now** — fixed a real regression
+reported against `apps/engineering`'s หัวหน้าสังกัด (`leader`) role — after
+ingestion, an admin could no longer directly assign a specific user to
+lead a specific department the way the original (pre-ingestion) app
+allowed, and even once the generic `dept_name` → `department_aliases`
+mapping was configured, the leader's landing page stayed blank with no
+error. See §10b's "Role & department mapping" subsection (now extended)
+for the full root-cause writeup. Two bugs, both fixed:
 
 1. **No per-user escape hatch in department resolution**: the bulk
    `dept_name` → `department_aliases` chain was the *only* path, with no
@@ -1654,9 +1727,17 @@ All fixed:
    assigned, the only available action was reassigning to a *different*
    repairer — never back to unassigned. Added a small shared
    `ConfirmDialog` (`apps/engineering/src/components/ConfirmDialog.tsx`,
-   built on this app's own `alert-dialog.tsx` primitives — can't use
-   `packages/ui`'s version, same React 19 peer conflict as `AssetsNav`/
-   `AppHeader`) used for all four actions (delete, assign, reassign, and a
+   built on this app's own `alert-dialog.tsx` primitives — deliberately
+   still not `packages/ui`'s version even after §9 widened the React peer
+   range: `packages/ui`'s `Button` "primary" variant uses `bg-accent`/
+   `text-accent-fg`, and this app's own shadcn primitives already define
+   `--color-accent`/`--color-accent-foreground` natively for a different
+   purpose — a subtle hover-highlight color used by its calendar,
+   command palette, dropdown/context menus, and more. Aliasing `--color-accent`
+   to chub's bold brand color the way `AppHeader`'s `ThemeToggle` migration
+   aliased `--color-text`/`--color-text-muted` would repaint all of those
+   existing hover states; not a safe mechanical fix, so this wrapper stays)
+   used for all four actions (delete, assign, reassign, and a
    new "ส่งกลับไม่มอบหมาย" revert-to-`pending_assign` action on
    `LeaderPage.tsx`, which clears `assigned_to`/`assigned_by`/`assigned_at`
    the same way they looked before `assign()` ever ran). All four now also

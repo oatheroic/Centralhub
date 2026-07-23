@@ -1,5 +1,6 @@
 @import "tailwindcss" source(none);
 @source "../src";
+@source "../../../packages/ui/src";
 @import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
@@ -35,6 +36,8 @@
   --color-brand: var(--brand);
   --color-brand-soft: var(--brand-soft);
   --color-accent-red: var(--accent-red);
+  --color-text: var(--foreground);
+  --color-text-muted: var(--muted-foreground);
   --font-display: "Sarabun", "IBM Plex Sans Thai", system-ui, sans-serif;
 }
 
