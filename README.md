@@ -38,13 +38,15 @@ CentralHub/
 │   │                             # static SPA with its own self-hosted Postgres/
 │   │                             # PostgREST/storage-api (assets-db, postgrest-assets,
 │   │                             # storage-assets in docker-compose.yml), not a shared
-│   │                             # database or a cloud dependency
+│   │                             # database or a cloud dependency; archive/ holds dated
+│   │                             # snapshots of the raw export for future diffing (§10c/§10d)
 │   └── engineering/              # Second third-party app (§10b) — Lovable export with
 │                                  # real Supabase Auth + real RLS (unlike assets' USING
 │                                  # (true) gap), now CentralHub-gated the same way, with
 │                                  # its own self-hosted Postgres/PostgREST/storage-api
 │                                  # (engineering-db, postgrest-engineering,
-│                                  # storage-engineering)
+│                                  # storage-engineering); archive/ holds dated snapshots
+│                                  # of the raw export for future diffing (§10c/§10d)
 ├── packages/
 │   └── ui/                    # Shared design tokens, Tailwind preset, and React
 │                                # primitives (§9) — consumed via workspace:*
@@ -1280,6 +1282,157 @@ first pass, caught only in a dedicated cleanup afterward):
      with for a different package manager (`bun.lock`, `yarn.lock`,
      `package-lock.json`); a second lockfile in an app directory implies a
      second install path that doesn't actually exist here.
+
+**10. Archive a snapshot of the raw export, for future diffing.** §10d
+depends on this existing — a future Lovable update can only be diffed
+against what this ingestion actually started from if that starting point was
+kept. Skipping this step doesn't block the current ingestion, but it forces
+a full re-ingestion later instead of a scoped update, since there'll be
+nothing to diff against.
+   - Location: `apps/<app>/archive/<YYYYMMDD>-baseline/`, where the date is
+     the same one already chosen for this ingestion's first migration file's
+     timestamp prefix (step 5) — the snapshot and the migrations it produced
+     stay correlated by construction, no separate version number to invent
+     or keep in sync by hand.
+   - Contents: the raw export's source tree, placed directly under the
+     dated directory (no extra nested project-name folder) — `src/`,
+     `supabase/migrations/` (or wherever the export puts its schema),
+     `package.json`, and its build/tooling config (`vite.config.ts`,
+     `tsconfig.json`, `eslint.config.js`, `components.json`, `.prettierrc`,
+     etc.). Keep these even though step 7 converts the app away from them —
+     they're what a future diff needs to detect, e.g., "Lovable changed its
+     shadcn config."
+   - Strip before committing (regenerable, tool-specific to a stack this
+     repo doesn't run, or credential-shaped — none of it has diff value, all
+     of it is either bloat or a leak risk):
+     - `.env` — the export's hosted-Supabase URL/keys. Even a
+       publishable/anon key is project-specific and meaningless once
+       self-hosted; note the project ref in the archive's own `README.md`
+       instead of keeping the file.
+     - Lockfiles for a package manager this workspace doesn't use
+       (`bun.lockb`, `bun.lock`, `yarn.lock`) — `package.json` alone
+       captures dependency intent; a lockfile is large, binary or
+       near-binary, and diffs badly.
+     - Deploy-target config for a runtime this app won't run on
+       (`wrangler.jsonc` for Cloudflare Workers, etc.).
+     - Generated files (`src/routeTree.gen.ts` or equivalent router
+       codegen, build output directories) — pure build artifacts,
+       regenerated from source, never hand-edited upstream either.
+     - `node_modules/`, `dist/`, `.output/`, or any other build/install
+       directory, if the export included one.
+   - Add (or update) `apps/<app>/archive/README.md`: a short index listing
+     each snapshot directory, what it corresponds to (which ingestion or
+     update pass, the matching migration timestamp prefix), the original
+     project name and hosted-project ref, and exactly what was stripped from
+     that snapshot and why — so a future reader isn't left guessing whether
+     something's absence was deliberate.
+   - This step is retroactive-safe: if an ingestion shipped without a
+     snapshot, add one later the same way, dated to when it's actually
+     added (not backdated) — a late baseline is still strictly better than
+     none, it just can't be used to diff anything that changed before it
+     was taken.
+
+---
+
+## 10d. Updating an already-ingested third-party app
+
+- **Objective**: when the original Lovable project keeps getting worked on
+  after ingestion, integrate what changed — new features, schema changes,
+  UI tweaks — into the already-ingested, already-running app, **without**
+  a full re-ingestion, and without disturbing the live data already sitting
+  in that app's own Postgres. Re-ingesting from scratch would work but
+  throws away every RLS/JWT/role rewrite §10c's ingestion steps already did,
+  and risks the running app's real data — this section exists so that's the
+  fallback, not the default.
+- **Why this is a merge problem, not a resync problem**: ingestion already
+  severs the app from Lovable's hosted Supabase project (§10c step 1) — the
+  app's own `<app>-db` is the only live copy of its data, and it was never
+  kept in sync with the hosted project after ingestion. So "Lovable updated
+  the app" never means pulling new data; it only ever means merging a
+  **code/schema diff** into a running fork that's already been rewritten
+  once. Everything below follows from treating it that way.
+
+**1. Diff against the archived baseline, not the export in general.** Pull
+the new Lovable export and diff it against the *specific* snapshot in
+`apps/<app>/archive/` that this app's current code/migrations were actually
+built from (see §10c step 10) — not against Lovable's current state in the
+abstract, and not against a different app's baseline. If no matching
+snapshot exists (an ingestion done before this convention existed, or one
+where step 10 was skipped), there's nothing reliable to scope a diff
+against — treat the update as a full re-ingestion (§10c) rather than
+guessing at what changed.
+
+**2. Classify the diff before deciding how to integrate it** — this is the
+actual decision point, and guessing wrong in either direction is expensive
+(patching a structural change accumulates the exact "second layer of
+workarounds" §10c's guiding principle already warns against; re-ingesting
+an additive change destroys the "no live-data disruption" property this
+whole section exists for):
+   - **Additive** (new columns/tables/components, no touched auth/role
+     logic, nothing renamed or removed that existing code/data depends on)
+     → integrate as a patch, steps 3-6 below.
+   - **Destructive against live data** (renamed/dropped/retyped columns
+     that already hold real rows) → still a patch, but step 4's migration
+     needs to be a real, hand-written, reviewed data migration — never a
+     blind append. Test it against a copy of the live volume before
+     applying it to the real one.
+   - **Structural** (the update changes the auth model, the role model, or
+     anything §10c's minted-JWT/RLS rewrite already touched — e.g. the
+     export adds real Supabase Auth where there was none before, the same
+     shift that made `apps/engineering` harder than `apps/assets`) →
+     re-ingest (§10c), treating the new export as a fresh pass with the
+     running app's data as something to migrate forward explicitly, not
+     patch around. A diff that's this pervasive means "preserve what's
+     already been adapted" stops being a real constraint, same reasoning
+     §10c's guiding principle already applies to a first-time ingestion.
+
+**3. Frontend**: re-apply §10c step 7's conversions to just the changed
+files — strip any SSR/framework-specific scaffolding the new files bring
+back in, repoint `supabase-js` calls at the app's existing self-hosted
+PostgREST/storage-api client (already configured, nothing new to set up),
+wire any new mutating action through the existing `useGuardedAction`/
+data-token pattern. This is manual cherry-picking scoped to the diff, not a
+mechanical merge — the same category of work §10c step 7 does for a whole
+app, just smaller.
+
+**4. Schema**: add a **new** migration file,
+`apps/<app>/db/migrations/<YYYYMMDD>_<feature>.sql`, written idempotently
+(`ADD COLUMN IF NOT EXISTS`, `CREATE TABLE IF NOT EXISTS`) in the same style
+as the existing files — don't regenerate or edit the existing migration
+files in place. `migrate.sh` already re-applies every file on every
+container start with no "already migrated" guard (§10c step 5), so a purely
+additive new file is picked up automatically and safely, without touching
+files that already match the live schema. This is the payoff of §10c's
+"rewrite to clean idempotent files" decision: it gives future updates a
+stable base to layer onto, instead of an ordered history that would need
+splicing.
+
+**5. RLS for anything new**: same manual rewrite §10c step 5 already
+requires for a first ingestion — any new table/column needs policies
+written against the minted JWT's claims from the start, never copied as
+`USING (true)` from the export. Add these to the same new migration file
+from step 4, not the existing RLS file.
+
+**6. Role/department mapping for new features**: if the update adds a new
+role or permission boundary, it's just new rows in the existing generic
+`app_role_rules`/`app_role_overrides` tables via that app's own admin panel
+— per §10c step 6, CentralHub's side (auth-gateway, `user_attributes`)
+never needs new tables or changes for this, regardless of how many updates
+an app goes through.
+
+**7. Verify against the real running stack, with existing data intact** —
+the part that actually proves continuity, not just that the feature works:
+extend `scripts/test-stack.mjs`'s assertions for the app (§10c step 8) to
+cover the new surface, then bring the stack up against the **existing**
+data volume (not a fresh one) and confirm the new migration applies cleanly
+and the app still works end-to-end for data that predates the update.
+
+**8. Re-archive.** Add a new dated snapshot,
+`apps/<app>/archive/<YYYYMMDD>-update/`, of the export version just
+integrated, stripped the same way §10c step 10 strips a baseline, and
+update that app's `archive/README.md` index. This becomes the reference
+point for the *next* update's diff — skipping it silently breaks step 1 for
+whoever does the next update.
 
 ---
 
