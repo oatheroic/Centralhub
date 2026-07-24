@@ -3,6 +3,8 @@ import { completeLogin } from "../oidc.js";
 import { signSession, SESSION_COOKIE, ID_TOKEN_COOKIE } from "../session.js";
 import { safeRedirectPath } from "../safeRedirect.js";
 import { syncRolesFromKeycloak } from "../roles.js";
+import { renderOAuthStateErrorPage } from "../oauthStateErrorPage.js";
+import { config } from "../config.js";
 
 export const callbackRouter = Router();
 
@@ -20,7 +22,13 @@ callbackRouter.get("/callback", async (req, res) => {
   res.clearCookie(REDIRECT_COOKIE);
 
   if (!code || !state || !expectedState || state !== expectedState) {
-    res.status(400).send("Invalid or missing OAuth state — possible CSRF attempt, login aborted.");
+    // Most real-world hits here are not CSRF — they're chub_auth_state
+    // simply expiring because the user idled on Keycloak's own login form
+    // (see login.ts's STATE_COOKIE maxAge). Send them back into a fresh
+    // login rather than dead-ending on a raw error, preserving where they
+    // were originally headed.
+    const retryTo = `${config.gatewayPublicUrl}/auth/login?redirect=${encodeURIComponent(redirect)}`;
+    res.status(400).type("html").send(renderOAuthStateErrorPage(retryTo));
     return;
   }
 
