@@ -7,12 +7,13 @@ const STORAGE_KEY = "chub_theme";
 
 export type Theme = "dark" | "light";
 
-// Dark is the default across every app: a browser with no stored
-// preference yet always starts dark, regardless of the OS/browser's own
-// prefers-color-scheme. tokens.css's `.dark` class forces the dark
-// variable set unconditionally, which is exactly what applyTheme uses.
+// Light is the default across every app: a browser with no stored
+// preference yet always starts light, regardless of the OS/browser's own
+// prefers-color-scheme. applyTheme sets an explicit `.light` class in that
+// case, which also suppresses tokens.css's `prefers-color-scheme: dark`
+// fallback block (guarded by `:not(.light)`).
 export function getStoredTheme(): Theme {
-  return window.localStorage.getItem(STORAGE_KEY) === "light" ? "light" : "dark";
+  return window.localStorage.getItem(STORAGE_KEY) === "dark" ? "dark" : "light";
 }
 
 export function applyTheme(theme: Theme): void {
