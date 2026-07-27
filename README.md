@@ -543,18 +543,22 @@ first- vs. third-party by fiat**.
     re-surfaces a changed message to users who dismissed an earlier one).
     The config constant defaults to `null` (nothing shown) — still no
     operator need for an actual announcement yet, but the plumbing is done.
-  - **Dark mode, defaulted on, every app**: `packages/ui/src/theme.ts` —
+  - **Dark/light mode, every app**: `packages/ui/src/theme.ts` —
     framework-agnostic on purpose, no React import — reads/writes one
     `chub_theme` localStorage key and toggles the `dark`/`light` class on
     `<html>`. Since every app is served from the same gateway origin
     (`localhost:8080`), that one key is naturally shared across all of
     them — switching the theme in any app carries over to the rest on
-    their next load. A browser with no stored preference yet always starts
-    **dark**, regardless of the OS's own `prefers-color-scheme` (tokens.css's
-    `.dark` class forces the dark variable set unconditionally). Each app's
-    `main.tsx` calls `applyTheme(getStoredTheme())` before the first render
-    (not inside a `useEffect`), so there's no flash of the light default
-    before dark applies. `packages/ui`'s `ThemeToggle` (Sun/Moon icon
+    their next load. A browser with no stored preference yet starts
+    **light** (flipped from dark-by-default in a later pass — see the
+    responsive-redesign status entry below), regardless of the OS's own
+    `prefers-color-scheme`: `applyTheme()` sets an explicit `.light` class
+    on `<html>` in that case, which suppresses tokens.css's
+    `prefers-color-scheme: dark` fallback block (guarded by `:not(.light)`).
+    Each app's `main.tsx` calls `applyTheme(getStoredTheme())` before the
+    first render (not inside a `useEffect`), so there's no flash of the
+    wrong default before the resolved theme applies. `packages/ui`'s
+    `ThemeToggle` (Sun/Moon icon
     button, built on the same `theme.ts`) sits at the top-right of
     `AppShell`'s header (admin/marketing/finance/`_template`) and of
     `central-hub`'s own bespoke header. `packages/ui`'s peer range was
@@ -589,6 +593,46 @@ first- vs. third-party by fiat**.
     `AttributeSelect` (below) is `w-full` with a `min-w-[9rem]` floor for
     the same reason — it was a fixed 112px regardless of how much room its
     `DataTable` column actually had.
+  - **`central-hub` responsive/multi-device redesign + own-department
+    pinning**: the landing dashboard's grid/header/search/filter/recency UI
+    (all of the above, previously desktop-first with only incidental
+    `sm`/`lg`/`xl` breakpoints) was reworked for three explicit tiers —
+    desktop, tablet (≤1024px), phone (≤640px) — rather than one blunt
+    breakpoint. Search collapses to an icon button that opens a full-width
+    row below the header on phone (same `query` state as the desktop input,
+    no dual-input sync needed); filter tabs and the "Recently used" row both
+    scroll horizontally with scroll-snap (recency as one row at every
+    breakpoint, not just phone — a better fit for a short, order-matters
+    list generally); the search/filter row is sticky so it stays reachable
+    while scrolling a long grouped department list; `env(safe-area-inset-*)`
+    padding on the header/content wrapper; a `[@media(pointer:coarse)]:`
+    rule bumps interactive targets (theme toggle, tabs, close buttons) to
+    ~40–44px independent of viewport width, catching touch-only tablets in
+    landscape. Five new `--dept-*` color tokens (`packages/ui/src/tokens.css`)
+    give each department a left-stripe on `AppCard`, a swatch in the filter
+    tabs, and (new optional `Avatar` `ringVar` prop) a ring on the signed-in
+    user's own avatar — matched case-insensitively against the real
+    `attribute_values`-managed department strings (`Marketing`, `Finance`,
+    `Engineering`, `Operations`, `Platform` as seeded — **not** the
+    app-id-shaped names like `assets`/`admin` a first pass assumed), with a
+    neutral fallback for anything unrecognized. Own-department pinning: in
+    the unfiltered "All" view, the section matching the signed-in user's
+    `department` (now surfaced on `GET /auth/me` alongside `position`/
+    `jobLevel`, pulled from the existing `user_attributes` table — a small,
+    intentionally-generic auth-gateway addition so a future feature needing
+    `position`/`jobLevel` doesn't need another round-trip) renders right
+    after Recently used, tagged "Your team"; falls back to normal order with
+    no special-casing when the user has no department set or their
+    department has zero visible apps (both fall out of the existing
+    `departments` derivation automatically). Filter-tab order itself is
+    deliberately left unaffected by identity, so the tab list doesn't
+    reorder itself out from under a returning user. Verified against the
+    live stack (real Keycloak login, headless-Chrome screenshots at each
+    tier, a temporary department reassignment to exercise the pinning path)
+    rather than by inspection alone.
+  - **Admin `apps/admin` responsive pass and the "Add app" Department
+    free-text field → managed-dropdown fix are deferred**, not part of this
+    pass — see §13.
 
 ---
 
@@ -1606,6 +1650,8 @@ specific to `apps/engineering` (§10b), then everything else.
 | Production-safe credentials | `keycloak/realm-export.json`, `.env` | `dev-admin`/`dev-user`/client secret are dev-only seed data — see §6, §7 |
 | `usePermissions.ts`'s `window.alert()` → toast | `apps/_template`, `apps/marketing`, `apps/finance` | Duplicated across 3 files by design (§9); a real fix needs extracting the hook into `packages/ui` first, out of scope for §9's UI-primitives pass |
 | Replace app-local department vocabularies with CentralHub's official `attribute_values` list directly, retiring alias/mapping tables | `apps/engineering`'s own `departments` table (and `DeptAliasSection`'s mapping into it); the equivalent for `apps/assets`'s department-shaped demo data (`cc_recipient`/`recipient`) | `apps/engineering`'s `departments` is a real FK'd entity (machines, repair jobs, profiles reference `department_id`), so collapsing it onto `attribute_values` means either migrating those FKs to reference names directly or a synced mirror table — materially larger than the CRUD/dropdown work above, which only touched the CentralHub-side picker, not each app's own department model |
+| `apps/admin` responsive/multi-device redesign | `apps/admin/src/App.tsx` (4 inline `DataTable`-heavy panels: Permissions, Users, Audit), `components/AppsPanel.tsx`, shared `packages/ui/src/components/AppShell.tsx` header | `central-hub`'s landing page got a full responsive pass (§9, this session); admin is still desktop-first (no admin-authored breakpoints beyond `AppShell`'s incidental `p-4 sm:p-6 lg:p-8`). Meaningfully bigger scope than central-hub's card-grid rework — `DataTable` has no card/stacked-row fallback, so each of the 4 tables would need its own narrow-viewport treatment, not just header/spacing polish. Deferred to its own session by request |
+| "Add app" form's Department field is free text, not a dropdown | `apps/admin/src/components/AppFormDialog.tsx` (currently a plain `Input`, only validated non-empty) | Should reuse the same managed-vocabulary pattern `UsersPanel` already uses for its department/position/job-level columns (`components/AttributeSelect.tsx`, backed by `GET/POST /auth/admin/attribute-values/department` — both already exist and are already used elsewhere in this same app), so a typo/new spelling here can't silently fork from `attribute_values`. Scoped and ready to implement, deferred to its own session by request |
 
 ---
 
@@ -1702,7 +1748,54 @@ pnpm stack:up
 For whoever (human or agent) picks this repo up next — what changed most
 recently, and where to look first.
 
-**What just happened**: fixed the React-version-driven UI fragmentation
+**What just happened**: two pieces of follow-up work off a UX handoff spec
+for `central-hub`'s landing dashboard. First, a full responsive/multi-device
+redesign of that dashboard plus own-department pinning — see §9's new
+`central-hub responsive/multi-device redesign` status bullet for the full
+writeup (sticky search/filter, mobile search collapse, scroll-snap tabs/
+recency row, `--dept-*` color tokens, safe-area insets, coarse-pointer
+target bumps, `GET /auth/me` now also returning `department`/`position`/
+`jobLevel`). Verified against the live stack: real Keycloak login, headless-
+Chrome screenshots (no chromium-cli/Playwright available in this
+environment, so drove Chrome directly over the DevTools protocol via
+Node's built-in `WebSocket`, cookie-injecting a real session) across
+desktop/tablet/phone, plus a temporary `user_attributes.department`
+reassignment (reverted after) to actually exercise the pinning path rather
+than trust it from reading the code. One correction made mid-implementation
+worth flagging: the handoff spec's department color-token names assumed
+app-id-shaped department strings (`assets`, `admin`); the real `apps` table
+uses capitalized display names (`Marketing`, `Finance`, `Engineering`,
+`Operations`, `Platform`) — fixed before it shipped, not after.
+
+Second, flipped the shared default theme from dark to light
+(`packages/ui/src/theme.ts`'s `getStoredTheme()` fallback) — one-line, one-
+file change, picked up by every app automatically via the shared
+`chub_theme` localStorage key; no flash-of-wrong-theme risk since every
+app already calls `applyTheme(getStoredTheme())` before first paint (or,
+for `apps/engineering`, `ThemeToggle`'s own mount-time initializer — see
+§9). Verified live with a fresh browser profile (no stored preference).
+
+**Explicitly deferred, not done this session** (see §13's General table for
+both): extending this same responsive redesign to `apps/admin` (four
+`DataTable`-heavy panels — Permissions, Users, Apps, Audit — a materially
+bigger job than central-hub's card-grid rework, since `DataTable` has no
+mobile/card fallback today); and swapping the "Add app" form's free-text
+Department `Input` (`apps/admin/src/components/AppFormDialog.tsx`) for a
+dropdown of the managed `attribute_values` vocabulary, reusing
+`AttributeSelect.tsx` the same way `UsersPanel` already does. Both are
+scoped and ready to pick up, just not started.
+
+**Files touched this session**: `apps/central-hub/src/App.tsx`,
+`src/components/AppCard.tsx`/`IdentityBanner.tsx`/`SystemBanner.tsx`,
+`src/lib/auth.ts`, new `src/lib/deptColor.ts`, `index.html`;
+`packages/ui/src/components/Avatar.tsx`/`ThemeToggle.tsx`, `src/theme.ts`,
+`src/tokens.css`, `tailwind-preset.cjs`;
+`services/auth-gateway/src/routes/session.ts`; this README. No database
+migrations.
+
+---
+
+**Older handoff, preserved below for now** — fixed the React-version-driven UI fragmentation
 between first-party apps and the two third-party ingestions
 (`apps/assets`, `apps/engineering`) — see §9's `ThemeToggle` note and
 §10/§10b's design-system bullets (now updated) for the full writeup.
