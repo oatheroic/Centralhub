@@ -21,6 +21,13 @@ module.exports = {
           DEFAULT: "rgb(var(--chub-danger) / <alpha-value>)",
           bg: "rgb(var(--chub-danger-bg) / <alpha-value>)",
         },
+        dept: {
+          marketing: "rgb(var(--dept-marketing) / <alpha-value>)",
+          finance: "rgb(var(--dept-finance) / <alpha-value>)",
+          engineering: "rgb(var(--dept-engineering) / <alpha-value>)",
+          assets: "rgb(var(--dept-assets) / <alpha-value>)",
+          admin: "rgb(var(--dept-admin) / <alpha-value>)",
+        },
       },
     },
   },

@@ -1,17 +1,18 @@
 import { Avatar, Badge, Skeleton } from "@centralhub/ui";
 import type { SessionUser } from "../lib/auth";
+import { deptColorVar } from "../lib/deptColor";
 
 export function IdentityBanner({ user }: { user: SessionUser }) {
   return (
-    <div className="flex items-center justify-between rounded-lg border border-border bg-surface px-5 py-3">
-      <div className="flex items-center gap-3">
-        <Avatar name={user.name} size={32} />
-        <div>
-          <p className="text-sm font-medium text-text">{user.name}</p>
-          <p className="text-xs text-text-muted">{user.email}</p>
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-surface px-5 py-3">
+      <div className="flex min-w-0 items-center gap-3">
+        <Avatar name={user.name} size={32} ringVar={user.department ? deptColorVar(user.department) : undefined} />
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium text-text">{user.name}</p>
+          <p className="truncate text-xs text-text-muted">{user.email}</p>
         </div>
       </div>
-      <div className="flex items-center gap-3">
+      <div className="flex shrink-0 items-center gap-3">
         <Badge tone="success">{user.roles.join(", ")}</Badge>
         <a href="/auth/logout" className="text-xs text-text-muted hover:text-text">
           Log out

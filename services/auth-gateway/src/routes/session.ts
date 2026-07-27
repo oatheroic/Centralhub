@@ -3,6 +3,7 @@ import { SESSION_COOKIE, verifySession, type SessionClaims } from "../session.js
 import { getPermission, type PermissionSet } from "../permissions.js";
 import { isRevoked } from "../revocation.js";
 import { getRoles, hasRole } from "../roles.js";
+import { getUserAttributes } from "../attributes.js";
 
 const VERBS: (keyof PermissionSet)[] = ["read", "write", "edit", "delete"];
 
@@ -115,7 +116,21 @@ sessionRouter.get("/me", async (req, res) => {
   const { claims } = resolved;
   try {
     const roles = await getRoles(claims.sub);
-    res.json({ sub: claims.sub, name: claims.name, email: claims.email, roles });
+    // Included for the dashboard's own-department pinning/avatar-ring
+    // feature; position/jobLevel are plumbed through alongside it so a
+    // future central-hub feature doesn't need another gateway round-trip.
+    // A user with no user_attributes row (contractor, dev-admin-style
+    // cross-functional seed) simply gets nulls here, not an error.
+    const attrs = await getUserAttributes(claims.sub);
+    res.json({
+      sub: claims.sub,
+      name: claims.name,
+      email: claims.email,
+      roles,
+      department: attrs?.department ?? null,
+      position: attrs?.position ?? null,
+      jobLevel: attrs?.jobLevel ?? null,
+    });
   } catch (err) {
     console.error("auth-gateway: /me role lookup failed", err);
     res.status(503).json({ error: "unavailable" });

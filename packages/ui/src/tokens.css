@@ -24,6 +24,15 @@
 
   --chub-danger: 220 38 38; /* red-600 */
   --chub-danger-bg: 254 226 226; /* red-100 */
+
+  /* Department accents — one flat value each (not part of the light/dark
+     neutral scale above), used for the dashboard's per-department stripes,
+     swatches, and "your team" avatar ring. */
+  --dept-marketing: 199 125 255;
+  --dept-finance: 52 211 153;
+  --dept-engineering: 242 169 59;
+  --dept-assets: 56 189 248;
+  --dept-admin: 251 113 133;
 }
 
 @media (prefers-color-scheme: dark) {

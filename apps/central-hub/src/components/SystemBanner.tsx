@@ -24,7 +24,7 @@ export function SystemBanner({ id, message }: { id: string; message: string }) {
           setDismissed(true);
         }}
         aria-label="Dismiss announcement"
-        className="shrink-0 rounded p-1 text-text-muted transition hover:bg-border hover:text-text"
+        className="shrink-0 rounded p-1 text-text-muted transition hover:bg-border hover:text-text [@media(pointer:coarse)]:p-2.5"
       >
         <X size={16} />
       </button>

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Moon, Sun } from "lucide-react";
 import { applyTheme, getStoredTheme, setStoredTheme, type Theme } from "../theme";
 
-export function ThemeToggle() {
+export function ThemeToggle({ className = "" }: { className?: string }) {
   const [theme, setTheme] = useState<Theme>(() => {
     const initial = getStoredTheme();
     // Applied here too (not just in each app's main.tsx bootstrap) so the
@@ -23,7 +23,7 @@ export function ThemeToggle() {
       onClick={toggle}
       aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
       title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-text-muted transition hover:bg-border hover:text-text"
+      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-text-muted transition hover:bg-border hover:text-text [@media(pointer:coarse)]:h-10 [@media(pointer:coarse)]:w-10 ${className}`}
     >
       {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
     </button>

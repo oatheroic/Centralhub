@@ -3,6 +3,9 @@ export type SessionUser = {
   name: string;
   email: string;
   roles: string[];
+  department: string | null;
+  position: string | null;
+  jobLevel: string | null;
 };
 
 export async function fetchSession(): Promise<SessionUser | null> {
