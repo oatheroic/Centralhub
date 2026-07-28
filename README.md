@@ -630,9 +630,16 @@ first- vs. third-party by fiat**.
     live stack (real Keycloak login, headless-Chrome screenshots at each
     tier, a temporary department reassignment to exercise the pinning path)
     rather than by inspection alone.
-  - **Admin `apps/admin` responsive pass and the "Add app" Department
-    free-text field → managed-dropdown fix are deferred**, not part of this
-    pass — see §13.
+  - **Admin `apps/admin` responsive pass is still deferred**, not part of
+    this session — see §13. The "Add app" Department free-text field →
+    managed-dropdown fix (the other item deferred alongside it) has since
+    been done in a follow-up session: `AppFormDialog.tsx`'s Department field
+    is now an `AttributeSelect` (the same managed-vocabulary picker
+    `UsersPanel` uses), sourced from `GET /auth/admin/attribute-values/department`
+    with a "+ Add new..." path that posts through the same endpoint — no
+    backend change needed, both already existed. Verified against the live
+    stack: create-mode dropdown lists the real seeded departments, edit-mode
+    pre-selects the row's existing value correctly.
 
 ---
 
@@ -1650,8 +1657,7 @@ specific to `apps/engineering` (§10b), then everything else.
 | Production-safe credentials | `keycloak/realm-export.json`, `.env` | `dev-admin`/`dev-user`/client secret are dev-only seed data — see §6, §7 |
 | `usePermissions.ts`'s `window.alert()` → toast | `apps/_template`, `apps/marketing`, `apps/finance` | Duplicated across 3 files by design (§9); a real fix needs extracting the hook into `packages/ui` first, out of scope for §9's UI-primitives pass |
 | Replace app-local department vocabularies with CentralHub's official `attribute_values` list directly, retiring alias/mapping tables | `apps/engineering`'s own `departments` table (and `DeptAliasSection`'s mapping into it); the equivalent for `apps/assets`'s department-shaped demo data (`cc_recipient`/`recipient`) | `apps/engineering`'s `departments` is a real FK'd entity (machines, repair jobs, profiles reference `department_id`), so collapsing it onto `attribute_values` means either migrating those FKs to reference names directly or a synced mirror table — materially larger than the CRUD/dropdown work above, which only touched the CentralHub-side picker, not each app's own department model |
-| `apps/admin` responsive/multi-device redesign | `apps/admin/src/App.tsx` (4 inline `DataTable`-heavy panels: Permissions, Users, Audit), `components/AppsPanel.tsx`, shared `packages/ui/src/components/AppShell.tsx` header | `central-hub`'s landing page got a full responsive pass (§9, this session); admin is still desktop-first (no admin-authored breakpoints beyond `AppShell`'s incidental `p-4 sm:p-6 lg:p-8`). Meaningfully bigger scope than central-hub's card-grid rework — `DataTable` has no card/stacked-row fallback, so each of the 4 tables would need its own narrow-viewport treatment, not just header/spacing polish. Deferred to its own session by request |
-| "Add app" form's Department field is free text, not a dropdown | `apps/admin/src/components/AppFormDialog.tsx` (currently a plain `Input`, only validated non-empty) | Should reuse the same managed-vocabulary pattern `UsersPanel` already uses for its department/position/job-level columns (`components/AttributeSelect.tsx`, backed by `GET/POST /auth/admin/attribute-values/department` — both already exist and are already used elsewhere in this same app), so a typo/new spelling here can't silently fork from `attribute_values`. Scoped and ready to implement, deferred to its own session by request |
+| `apps/admin` responsive/multi-device redesign | `apps/admin/src/App.tsx` (4 inline `DataTable`-heavy panels: Permissions, Users, Audit), `components/AppsPanel.tsx`, shared `packages/ui/src/components/AppShell.tsx` header | `central-hub`'s landing page got a full responsive pass (§9); admin is still desktop-first (no admin-authored breakpoints beyond `AppShell`'s incidental `p-4 sm:p-6 lg:p-8`). Meaningfully bigger scope than central-hub's card-grid rework — `DataTable` has no card/stacked-row fallback, so each of the 4 tables would need its own narrow-viewport treatment, not just header/spacing polish. Deferred to its own session by request |
 
 ---
 
@@ -1748,7 +1754,30 @@ pnpm stack:up
 For whoever (human or agent) picks this repo up next — what changed most
 recently, and where to look first.
 
-**What just happened**: two pieces of follow-up work off a UX handoff spec
+**What just happened**: picked up one of the two items explicitly deferred
+last session — the "Add app" form's Department field was a free-text
+`Input`, letting an admin type any string instead of picking from the
+managed `attribute_values` vocabulary. Replaced it with `AttributeSelect`
+(`apps/admin/src/components/AppFormDialog.tsx`), the same managed-dropdown
+component `UsersPanel` already uses for department/position/job-level; wired
+`AppsPanel.tsx` to fetch `GET /auth/admin/attribute-values/department` on
+mount and post new values through the same endpoint's `POST` — no backend
+change needed, both already existed and were already in use elsewhere in
+this app. Verified against the live stack (real Keycloak login as
+`dev-admin`, headless-Chrome CDP): create-mode dropdown lists the real
+seeded departments (`Engineering`, `Executive`, `Finance`, `Marketing`,
+`Operations`, `Purchasing`, `Quality Control`) plus "+ Add new...", and
+edit-mode correctly pre-selects the row's existing department (checked
+against the `finance` app → `Finance`). The other deferred item, `apps/admin`'s
+full responsive/multi-device redesign, is still not started — see §13.
+
+**Files touched this session**: `apps/admin/src/components/AppFormDialog.tsx`,
+`apps/admin/src/components/AppsPanel.tsx`, this README. No database
+migrations, no backend changes.
+
+---
+
+**Older handoff, preserved below for now**: two pieces of follow-up work off a UX handoff spec
 for `central-hub`'s landing dashboard. First, a full responsive/multi-device
 redesign of that dashboard plus own-department pinning — see §9's new
 `central-hub responsive/multi-device redesign` status bullet for the full

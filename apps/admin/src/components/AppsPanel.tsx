@@ -71,6 +71,7 @@ export function AppsPanel() {
   const [editing, setEditing] = useState<App | "new" | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<App | null>(null);
   const [reachability, setReachability] = useState<Record<string, Reachability>>({});
+  const [departmentOptions, setDepartmentOptions] = useState<string[]>([]);
   const toast = useToast();
 
   function refetch() {
@@ -84,6 +85,30 @@ export function AppsPanel() {
   }
 
   useEffect(refetch, []);
+
+  // Same managed vocabulary the Users panel's department AttributeSelect
+  // draws from (attribute_values table, kind="department") — keeps app
+  // registration from drifting into ad-hoc department spellings.
+  useEffect(() => {
+    fetch("/auth/admin/attribute-values/department", { credentials: "same-origin" })
+      .then((res) => (res.ok ? (res.json() as Promise<string[]>) : []))
+      .then(setDepartmentOptions);
+  }, []);
+
+  async function addDepartmentOption(value: string) {
+    try {
+      const res = await fetch("/auth/admin/attribute-values/department", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ value }),
+      });
+      if (!res.ok) throw new Error(`${res.status}`);
+      setDepartmentOptions((await res.json()) as string[]);
+    } catch (err) {
+      toast.show({ tone: "danger", title: "Couldn't add department", description: (err as Error).message });
+    }
+  }
 
   async function checkReachability(app: App) {
     setReachability((prev) => ({ ...prev, [app.id]: "checking" }));
@@ -255,6 +280,8 @@ export function AppsPanel() {
         onOpenChange={(open) => !open && setEditing(null)}
         initial={editing && editing !== "new" ? toFormValues(editing) : null}
         onSave={saveApp}
+        departmentOptions={departmentOptions}
+        onAddDepartment={addDepartmentOption}
       />
 
       <ConfirmDialog

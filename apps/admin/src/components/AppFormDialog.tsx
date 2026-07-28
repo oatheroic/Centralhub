@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import * as RadixDialog from "@radix-ui/react-dialog";
 import { Check } from "lucide-react";
 import { Button, Input } from "@centralhub/ui";
+import { AttributeSelect } from "./AttributeSelect";
 import { IconPicker } from "./IconPicker";
 
 export type AppFormValues = {
@@ -39,11 +40,15 @@ export function AppFormDialog({
   onOpenChange,
   initial,
   onSave,
+  departmentOptions,
+  onAddDepartment,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   initial: AppFormValues | null;
   onSave: (values: AppFormValues) => Promise<boolean>;
+  departmentOptions: string[];
+  onAddDepartment: (value: string) => Promise<void>;
 }) {
   const [draft, setDraft] = useState<AppFormValues>(initial ?? EMPTY);
   const [busy, setBusy] = useState(false);
@@ -99,7 +104,13 @@ export function AppFormDialog({
             </label>
             <label className="flex flex-col gap-1 text-sm">
               <span className="text-text-muted">Department</span>
-              <Input value={draft.department} onChange={(e) => set("department", e.target.value)} />
+              <AttributeSelect
+                value={draft.department}
+                options={departmentOptions}
+                placeholder="Select department"
+                onChange={(value) => set("department", value)}
+                onAddOption={onAddDepartment}
+              />
             </label>
             <label className="flex flex-col gap-1 text-sm">
               <span className="text-text-muted">Icon</span>
