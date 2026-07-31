@@ -7,8 +7,9 @@ import {
   bulkUpsertPermission,
   type PermissionSet,
 } from "../permissions.js";
-import { isKnownApp } from "../apps.js";
+import { isKnownApp, getApp } from "../apps.js";
 import { recordAudit } from "../audit.js";
+import { createNotification, fanOutNotification } from "../notifications.js";
 
 const VERBS: (keyof PermissionSet)[] = ["read", "write", "edit", "delete"];
 
@@ -55,6 +56,22 @@ adminPermissionsRouter.put(
         appId,
         detail: { before, after },
       });
+      // Notify only on a real "you can now reach something new" transition
+      // (read false -> true) — not every checkbox toggle (e.g. write/edit/
+      // delete alone, or a revoke) is something worth interrupting the user
+      // for. Fire-and-forget, same as recordAudit() above: a notification
+      // failure must never affect the permission change that already
+      // succeeded.
+      if (!before.read && after.read) {
+        const app = await getApp(appId);
+        void createNotification(userSub, {
+          sourceAppId: "central-hub",
+          type: "success",
+          title: `You now have access to ${app?.name ?? appId}`,
+          link: appId === "central-hub" ? "/" : `/apps/${appId}/`,
+          actorSub: req.session?.sub ?? null,
+        });
+      }
       res.sendStatus(204);
     } catch (err) {
       // Not an authz decision (the caller already passed requireAdmin) —
@@ -97,7 +114,19 @@ adminPermissionsRouter.put(
       return;
     }
     try {
+      // Captured before the bulk write, only when the patch actually grants
+      // read — this is the one thing the fan-out below needs (see
+      // permission.update's single-cell notification above for the same
+      // "false -> true is a real transition" reasoning). Since cleanPatch.read
+      // is applied identically to every selected user, "after" is
+      // deterministically true for all of them; only "before" varies.
+      const grantsRead = cleanPatch.read === true;
+      const before = grantsRead
+        ? await Promise.all(userSubs.map(async (userSub) => ({ userSub, read: (await getPermission(userSub, appId)).read })))
+        : [];
+
       await bulkUpsertPermission(userSubs, appId, cleanPatch);
+
       // One audit row for the whole batch, not one per user — the point is
       // recording the scope of the bulk action, not duplicating per-user
       // detail the single-cell route already covers for one-off edits.
@@ -107,6 +136,21 @@ adminPermissionsRouter.put(
         appId,
         detail: { userSubs, patch: cleanPatch, count: userSubs.length },
       });
+
+      if (grantsRead) {
+        const newlyGranted = before.filter((b) => !b.read).map((b) => b.userSub);
+        if (newlyGranted.length > 0) {
+          const app = await getApp(appId);
+          void fanOutNotification(newlyGranted, {
+            sourceAppId: "central-hub",
+            type: "success",
+            title: `You now have access to ${app?.name ?? appId}`,
+            link: appId === "central-hub" ? "/" : `/apps/${appId}/`,
+            actorSub: req.session?.sub ?? null,
+          });
+        }
+      }
+
       res.sendStatus(204);
     } catch (err) {
       console.error("auth-gateway: bulk permission upsert failed", err);

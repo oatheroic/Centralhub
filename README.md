@@ -491,7 +491,12 @@ first- vs. third-party by fiat**.
   variables, `darkMode: "class"`), a Tailwind preset, and reusable primitives —
   `Button`, `Card`, `Badge`, `Avatar`, `Input`, `EmptyState`, `Skeleton`,
   `Toast`/`ConfirmDialog` (built on Radix UI — the repo's first external UI
-  dependency), `AppShell`, `DataTable`. Ships as raw TypeScript source with no
+  dependency), `AppShell`, `DataTable`. A third Radix primitive,
+  `@radix-ui/react-popover`, was added later for `NotificationBell` (see the
+  Notifications section) — a deliberate choice over hand-rolling a dropdown
+  the way `Select` was (§10's "first shared dropdown" note): a notification
+  panel needs real focus-trap/escape/click-outside behavior, which is exactly
+  what buying the dependency gets you. Ships as raw TypeScript source with no
   build step, consumed directly by each app's own Vite/esbuild pipeline via
   `workspace:*`. Proven end-to-end in `apps/_template`, including a
   from-scratch Docker build — each consuming app's `Dockerfile` needs one
@@ -1658,6 +1663,11 @@ specific to `apps/engineering` (§10b), then everything else.
 | `usePermissions.ts`'s `window.alert()` → toast | `apps/_template`, `apps/marketing`, `apps/finance` | Duplicated across 3 files by design (§9); a real fix needs extracting the hook into `packages/ui` first, out of scope for §9's UI-primitives pass |
 | Replace app-local department vocabularies with CentralHub's official `attribute_values` list directly, retiring alias/mapping tables | `apps/engineering`'s own `departments` table (and `DeptAliasSection`'s mapping into it); the equivalent for `apps/assets`'s department-shaped demo data (`cc_recipient`/`recipient`) | `apps/engineering`'s `departments` is a real FK'd entity (machines, repair jobs, profiles reference `department_id`), so collapsing it onto `attribute_values` means either migrating those FKs to reference names directly or a synced mirror table — materially larger than the CRUD/dropdown work above, which only touched the CentralHub-side picker, not each app's own department model |
 | `apps/admin` responsive/multi-device redesign | `apps/admin/src/App.tsx` (4 inline `DataTable`-heavy panels: Permissions, Users, Audit), `components/AppsPanel.tsx`, shared `packages/ui/src/components/AppShell.tsx` header | `central-hub`'s landing page got a full responsive pass (§9); admin is still desktop-first (no admin-authored breakpoints beyond `AppShell`'s incidental `p-4 sm:p-6 lg:p-8`). Meaningfully bigger scope than central-hub's card-grid rework — `DataTable` has no card/stacked-row fallback, so each of the 4 tables would need its own narrow-viewport treatment, not just header/spacing polish. Deferred to its own session by request |
+| Notifications: realtime delivery (SSE/WebSocket) | services/auth-gateway's `routes/notifications.ts`, `packages/ui`'s `NotificationBell` | v1 is polling only (30s, paused on a hidden tab) — no realtime infra exists in this repo for anything, and one feature isn't reason enough to add it. The read endpoints are shaped so an SSE stream could be added on top without changing them |
+| Notifications: app-originated events (e.g. an engineering repair-job assignment notifying the new assignee) | a future `<app>-db` trigger → local outbox table → forwarder calling `POST /internal/notifications` server-to-server | Phase 1 (this pass) only wired auth-gateway's own events (permission grants, session revoke, admin announcements) — no app cooperation needed for that. A trusted app-originated event needs the trigger-writes-after-RLS pattern (never a browser asserting "notify this user," which is a spoofing surface) — designed, not built |
+| Notifications: announcement audience targeting beyond all-users (department/role/specific users) | `services/auth-gateway/src/routes/adminAnnouncements.ts`, `apps/admin`'s Announce panel | `POST /auth/admin/announcements` fans out to every user via `listUsers()`; per-department/role targeting would reuse the same `user_attributes`/`user_roles` lookups §7/§10's role-rule resolution already does, just not wired into this endpoint yet |
+| Notifications: per-user preferences / mute / per-type opt-out | `notifications` table (`type` column) | The `type` column (`info`/`success`/`warning`/`action_required`) leaves room for a future preference to filter on; nothing reads it that way yet |
+| Notifications: retention / prune job | `notifications` table | The list endpoint is simply bounded (most recent 50 per recipient) — no prune job yet, same "no retention job needed at this scale" posture as `audit_log` (§7) |
 
 ---
 
@@ -1718,7 +1728,16 @@ pnpm stack:up
   override-write guard (`POST .../role-overrides` targeting dev-admin's own
   sub → `400`, and its role_code stays `admin` afterward), instant session
   revocation, and logout (including that Keycloak's `prompt=login` actually
-  forces a fresh credential challenge, not a silent SSO bypass).
+  forces a fresh credential challenge, not a silent SSO bypass). Also covers
+  the Notifications primitive (§16) end to end: read-API isolation and
+  unread-count correctness, all four Phase 1 producers (permission grant
+  single + bulk, session revoke, admin announcement), mark-read/read-all,
+  and that `/internal/notifications` isn't reachable through the public
+  gateway — each producer assertion is delta-based (count-before vs.
+  count-after around the action) rather than an absolute count, since this
+  suite is meant to be rerunnable against the same persistent stack without
+  a restart and notification rows accumulate as real history, unlike the
+  throwaway rows §6b/§6c create and delete.
 - **Nginx gotcha it specifically guards against**: `error_page 403 =
   @permission_denied` (no explicit status code) means a *denied* app page
   and a *granted* one both come back as HTTP 200 — the denial is only
@@ -1731,7 +1750,7 @@ pnpm stack:up
   intact. Exits non-zero with a listed summary of failures if anything
   regressed.
 - **Deliberately not covered**: anything in §13's deferred/not-started
-  catalog (MFA, per-record permissions, bulk grants, audit log, per-session
+  catalog (MFA, per-record permissions, audit log, per-session
   tracking) — none of it is built, so there's nothing there to assert
   against yet. The background role re-sync poller (§8) is now built but
   also not covered here — its effect only becomes observable after waiting
@@ -1739,45 +1758,243 @@ pnpm stack:up
   request-per-request assertion style; verify it by hand (change a role in
   Keycloak's console, wait out the interval, confirm the next request
   reflects it without a force-logout).
-- **Status**: done — 91 assertions (extended this session with
-  `department_user_overrides` and the `resolve-role`/`role-codes` lookups,
-  see §16), verified to pass cleanly against a live rebuilt stack (91/91)
-  and to fail with an accurate diagnostic when a permission row is
-  corrupted by hand (tested by both routes: flipping the DB row directly,
-  and confirming the script's own "granted" checks catch a false-200 from
-  the Nginx gotcha above).
+- **Status**: done — 126 assertions (extended this session with the
+  Notifications section, §16), verified to pass cleanly against a live
+  rebuilt stack across two consecutive runs with no restart in between
+  (126/126 both times, confirming the delta-based notification assertions
+  above are actually idempotent and not just passing once by accident) and
+  to fail with an accurate diagnostic when a permission row is corrupted by
+  hand (tested by both routes: flipping the DB row directly, and confirming
+  the script's own "granted" checks catch a false-200 from the Nginx gotcha
+  above).
 
 ---
 
-## 16. Session handoff notes
+## 16. Notifications
+
+- **Objective**: serve company-wide notifications to every user (and,
+  eventually, targeted subsets) — both halves of the loop: an admin side that
+  can issue one, and a user side that can see, read, and keep a history of
+  what they've received. Before this, "notifications" was one hardcoded
+  client constant (`apps/central-hub/src/config/announcement.ts`) rendered as
+  a single dismissible banner (`SystemBanner.tsx`) — no backend, no admin UI,
+  no per-account read state (dismissal was a per-browser localStorage flag),
+  no history.
+- **Architecture — one auth-gateway-owned table, fan-out on write**: a single
+  `notifications` table (`services/auth-gateway/src/db.ts`'s `migrate()`),
+  same posture as `app_permissions`/`audit_log`/`apps` — not a new database,
+  not a per-app table the bell federates across. Two decisions worth
+  recording, since they're easy to relitigate without the reasoning:
+  - **Per-recipient rows for everything, including announcements** (fan-out
+    on write), not a broadcast row + separate read-join table. Every
+    notification already has its own `read_at`; recipient-subset targeting
+    (department/role/specific-user, once built — see §13) falls out for free
+    from who a producer chose to insert a row for, rather than needing a
+    second table.
+  - **A single owned table apps forward INTO**, not one table per app the
+    bell reads from. The bell is one shared component rendered in every
+    app's header (see below) — one session-gated read endpoint and one
+    unread count is simpler and cheaper than fanning reads out across every
+    app's own data layer on every poll tick.
+  - `dedupe_key` (nullable, partial-unique on `(recipient_sub, dedupe_key)`)
+    makes a re-fired logical event idempotent — used by the announcement
+    fan-out (`announce:<uuid>`) so a retried request can't duplicate a
+    broadcast to everyone. **Implementation gotcha**: a partial unique index
+    needs its `WHERE` predicate repeated on the `ON CONFLICT` clause itself
+    to be inferred as the arbiter — `ON CONFLICT (recipient_sub, dedupe_key)
+    DO NOTHING` alone throws "no unique or exclusion constraint matching the
+    ON CONFLICT specification" the moment a non-null `dedupe_key` row is
+    actually inserted; it must be `ON CONFLICT (recipient_sub, dedupe_key)
+    WHERE dedupe_key IS NOT NULL DO NOTHING` (`notifications.ts`'s
+    `fanOutNotification()`).
+  - History is bounded (most recent 50 per recipient), not pruned — no
+    retention job yet, same "not needed at this scale" posture as
+    `audit_log` (§7).
+- **Producers (Phase 1 — all of them live inside auth-gateway itself)**:
+  - **Permission grant, single-cell** (`routes/adminPermissions.ts`'s `PUT
+    /admin/permissions/:userSub/:appId`): notifies only on a real
+    `read: false -> true` transition (not every checkbox toggle — granting
+    write/edit/delete alone, or a revoke, isn't "you can now reach
+    something new"), title `"You now have access to <App name>"`, linking to
+    that app. Called beside the existing `recordAudit()` call, reusing the
+    same `before`/`after` diff already computed there — not inside
+    `permissions.ts`'s `upsertPermission()`, which has no access to that
+    context.
+  - **Permission grant, bulk** (`PUT /admin/permissions/bulk`): same
+    transition rule, applied per user — a bulk grant across N users produces
+    one notification each for whichever subset was newly granted, not N
+    notifications regardless of prior state, and not one shared notification
+    for the batch (unlike the audit log, which deliberately writes one row
+    for the whole batch — a notification is inherently per-recipient, an
+    audit entry is a record of the admin's action).
+  - **Session revoke** (`routes/adminSessions.ts`'s `PUT
+    /admin/sessions/:userSub/revoke`): the revoked user's very next request
+    is a 401 redirect to login, so they likely never see this live — created
+    anyway (`type: "warning"`, "Your session was ended by an administrator")
+    so it's waiting in their history once they log back in with a fresh,
+    unrevoked session.
+  - **Admin announcements** (`routes/adminAnnouncements.ts`'s `POST
+    /admin/announcements`, `requireAdmin`) — the one producer with no
+    existing admin action to piggyback a side-effect onto (the other three
+    already have their own buttons/panels), so this is the actual "admin
+    issuing a notification" surface. Resolves every user via the existing
+    `listUsers()` (`keycloakAdmin.ts`) and fans out one row each with a
+    shared `dedupe_key`. Audience is all-users only for now — see §13 for
+    the deferred subset-targeting seam.
+  - All four call `fanOutNotification()` (or its single-recipient wrapper
+    `createNotification()`) in-process, the same way every route already
+    calls `recordAudit()` directly — not over HTTP to
+    `POST /internal/notifications`, even though that route exists (see
+    below). Every producer write is fail-soft (logs and continues on
+    failure — a lost notification must never block or roll back the real
+    mutation it's describing), same posture as `audit.ts`.
+- **Endpoints**:
+  - `POST /internal/notifications` — server-to-server only, same posture as
+    `/backchannel-logout` and `/internal/apps/sync` (`routes/apps.ts`):
+    reachable only over the Docker network, never exposed through Nginx's
+    `auth_request` gate. **Not used by any Phase 1 producer** (they call the
+    in-process function directly, per above) — it exists as the seam for a
+    future out-of-process producer, e.g. Phase 2's app-originated events
+    (see §13). Nginx needs no location for it at all: the only `/internal/*`
+    locations declared in `gateway/conf.d/default.conf` are `/internal/verify`
+    and `/internal/verify-admin`, both marked `internal;`; an external
+    request for `/internal/notifications` simply falls through to whichever
+    generic gated location matches the path first and never reaches
+    auth-gateway's real handler.
+  - `GET /auth/notifications?limit=`, `GET /auth/notifications/count`,
+    `POST /auth/notifications/:id/read`, `POST /auth/notifications/read-all`
+    — session-gated (`requireSession`, the same shared middleware
+    `adminAttributeValuesRouter` etc. already use), every query scoped to
+    the resolved session's `sub`, never a client-supplied one. Mark-read on
+    an id that doesn't exist or belongs to someone else both come back
+    `404` (not `403`) — deliberately indistinguishable, so the response
+    can't be used to probe for other users' notification ids.
+- **Admin UI** (`apps/admin`): a new "Announce" tab
+  (`components/AnnouncementsPanel.tsx`) — title + optional body/link, `Send
+  to everyone`, no draft or schedule step. Deliberately minimal: two fields
+  and a button, not a new sub-app. Shows up in the Audit tab too
+  (`announcement.create`, with the recipient count).
+- **User UI** (`packages/ui`'s `NotificationBell`, a Radix `Popover` — see
+  §9's dependency note): a bell icon with an unread-count badge, polling
+  `GET /auth/notifications/count` every 30s and pausing while the tab is
+  hidden (`document.visibilitychange`, refetching immediately on becoming
+  visible again). Opening it lazy-loads the recent history (unread items
+  bold, read items dimmed, a left-border stripe colored by `type`); clicking
+  an item marks it read and navigates its `link` if it has one; "Mark all
+  read" clears the badge without deleting history. Self-contained — no
+  props, its own fetch/poll logic (`packages/ui/src/notifications.ts`,
+  framework-free like `theme.ts`) — same posture as `ThemeToggle` (which
+  also owns its own state) rather than the "app owns the fetch" split used
+  for `usePermissions.ts` (which genuinely needs a per-app `APP_ID`; nothing
+  here varies per app).
+  - **Wired into all five real header locations** — not just "every
+    `AppShell` app," since `central-hub`, `apps/assets`, and
+    `apps/engineering` each hand-author their own header (§9/§10) rather
+    than using `AppShell`: `packages/ui/src/components/AppShell.tsx`
+    (covers `marketing`/`finance`/`admin`/`_template`),
+    `apps/central-hub/src/App.tsx`, `apps/assets/src/components/AssetsNav.tsx`,
+    `apps/engineering/src/components/AppHeader.tsx` — the same four files
+    that already import `ThemeToggle`, confirming no React-19 peer conflict
+    (`packages/ui`'s peer range has covered `^19.0.0` since §9; `ThemeToggle`
+    already proved this) — no hand-authored "twin" needed for either
+    hand-authored app.
+  - **Two apps needed one small Tailwind v4 alias addition** beyond what
+    `ThemeToggle` already required (`--color-text`/`--color-text-muted`,
+    §9): `apps/assets/src/styles.css` and `apps/engineering/src/styles.css`
+    each gained `--color-bg`/`--color-surface`/`--color-danger` (assets also
+    `--color-success`, mapped to its existing-but-previously-unused
+    `--status-emerald`; engineering already had `--color-success`/
+    `--color-warning` aliased) in their `@theme inline` blocks, mapped to
+    each app's own closest existing shadcn variable — same "map to what's
+    already there, don't invent a new color" approach as §9's original
+    alias work, just two more token names needed since `NotificationBell`
+    uses more of the shared palette than `ThemeToggle` did.
+  - **A layout gotcha found via live browser verification**:
+    `apps/engineering/src/components/AppHeader.tsx`'s outer header was a
+    3-child `justify-between` flex (left content, `NotificationBell`,
+    `ThemeToggle`) — `justify-between` spreads *all* direct children evenly,
+    not just "first vs. last," so the bell landed stranded in the middle
+    instead of hugging the toggle. Fixed by wrapping the two right-side
+    icons in their own `flex gap-1` div, the same shape `AssetsNav.tsx` and
+    `central-hub`'s own header already used.
+- **Status**: done — table, all four producers, the admin Announce panel,
+  and the bell in all five header locations are live and verified against
+  the real stack (real Keycloak logins, real permission grants/session
+  revokes/announcements, real Playwright screenshots of the bell rendering
+  and opening in every location, `scripts/test-stack.mjs` extended with 24
+  new assertions covering isolation, count correctness, all four producers,
+  mark-read/read-all, and the internal-route unreachability proof — see §15).
+- **Deferred**: realtime delivery, Phase 2 app-originated events, audience
+  targeting beyond all-users, per-user preferences, and retention/pruning —
+  see §13's General table for each, with why.
+
+---
+
+## 17. Session handoff notes
 
 For whoever (human or agent) picks this repo up next — what changed most
 recently, and where to look first.
 
-**What just happened**: picked up one of the two items explicitly deferred
-last session — the "Add app" form's Department field was a free-text
-`Input`, letting an admin type any string instead of picking from the
-managed `attribute_values` vocabulary. Replaced it with `AttributeSelect`
-(`apps/admin/src/components/AppFormDialog.tsx`), the same managed-dropdown
-component `UsersPanel` already uses for department/position/job-level; wired
-`AppsPanel.tsx` to fetch `GET /auth/admin/attribute-values/department` on
-mount and post new values through the same endpoint's `POST` — no backend
-change needed, both already existed and were already in use elsewhere in
-this app. Verified against the live stack (real Keycloak login as
-`dev-admin`, headless-Chrome CDP): create-mode dropdown lists the real
-seeded departments (`Engineering`, `Executive`, `Finance`, `Marketing`,
-`Operations`, `Purchasing`, `Quality Control`) plus "+ Add new...", and
-edit-mode correctly pre-selects the row's existing department (checked
-against the `finance` app → `Finance`). The other deferred item, `apps/admin`'s
-full responsive/multi-device redesign, is still not started — see §13.
+**What just happened**: built the platform notification system described in
+§16 — a real backend (`notifications` table, four session-gated read
+endpoints, an admin announcement endpoint) and a real frontend
+(`NotificationBell` in `packages/ui`, wired into all five real header
+locations) replacing the old single-hardcoded-banner "notifications." Started
+from an execution plan a collaborator drafted without repo access; verified
+its architecture against the actual code first (six grounding corrections —
+wrong React-19/`packages/ui` peer-conflict premise that would've produced an
+unneeded hand-authored engineering "twin," `apps/assets` missing from the
+rollout entirely, producers that should call the notification helper
+in-process instead of self-issuing HTTP, a partial-unique-index `ON
+CONFLICT` bug in the dedupe logic, producer call sites moved to sit beside
+the existing `recordAudit()` calls rather than inside the DB-layer
+functions, and confirming Nginx needs zero edits by actually reading
+`gateway/conf.d/default.conf` rather than assuming) before writing any code
+— see §16 for what shipped. Verified end-to-end against the real stack, not
+just typecheck-clean: real Keycloak logins, real permission grants/session
+revokes/announcements fired through the actual admin endpoints, Playwright
+screenshots of the bell rendering and opening correctly in all five
+locations (installed fresh — no chromium-cli/Playwright available in this
+environment beforehand), and `scripts/test-stack.mjs` extended with 24 new
+assertions, run twice consecutively with no stack restart to confirm the
+delta-based assertions are actually idempotent (126/126 both times) rather
+than passing once by accident. One live-browser-only bug found and fixed
+along the way that no amount of code review would have caught: engineering's
+header used a 3-child `justify-between` flex, which stranded the bell in the
+middle instead of hugging the theme toggle.
 
-**Files touched this session**: `apps/admin/src/components/AppFormDialog.tsx`,
-`apps/admin/src/components/AppsPanel.tsx`, this README. No database
-migrations, no backend changes.
+**Files touched this session**: `services/auth-gateway/src/{db,notifications}.ts`,
+`services/auth-gateway/src/routes/{notifications,adminAnnouncements}.ts`,
+`services/auth-gateway/src/routes/{adminPermissions,adminSessions}.ts` (producer
+wiring), `services/auth-gateway/src/{audit,index}.ts`,
+`packages/ui/src/{notifications.ts,components/NotificationBell.tsx,components/Badge.tsx,components/AppShell.tsx,index.ts,package.json}`,
+`apps/central-hub/src/App.tsx`, `apps/assets/src/{components/AssetsNav.tsx,styles.css}`,
+`apps/engineering/src/{components/AppHeader.tsx,styles.css}`,
+`apps/admin/src/{App.tsx,components/AnnouncementsPanel.tsx}`,
+`scripts/test-stack.mjs`, this README. One new dependency
+(`@radix-ui/react-popover`, in `packages/ui`).
 
 ---
 
-**Older handoff, preserved below for now**: two pieces of follow-up work off a UX handoff spec
+**Older handoff, preserved below for now**: picked up one of the two items
+explicitly deferred in an earlier session — the "Add app" form's Department
+field was a free-text `Input`, letting an admin type any string instead of
+picking from the managed `attribute_values` vocabulary. Replaced it with
+`AttributeSelect` (`apps/admin/src/components/AppFormDialog.tsx`), the same
+managed-dropdown component `UsersPanel` already uses for department/position/
+job-level; wired `AppsPanel.tsx` to fetch
+`GET /auth/admin/attribute-values/department` on mount and post new values
+through the same endpoint's `POST` — no backend change needed, both already
+existed and were already in use elsewhere in this app. Verified against the
+live stack (real Keycloak login as `dev-admin`, headless-Chrome CDP):
+create-mode dropdown lists the real seeded departments (`Engineering`,
+`Executive`, `Finance`, `Marketing`, `Operations`, `Purchasing`,
+`Quality Control`) plus "+ Add new...", and edit-mode correctly pre-selects
+the row's existing department (checked against the `finance` app →
+`Finance`). The other deferred item, `apps/admin`'s full responsive/
+multi-device redesign, is still not started — see §13.
+
+Before that, two pieces of follow-up work off a UX handoff spec
 for `central-hub`'s landing dashboard. First, a full responsive/multi-device
 redesign of that dashboard plus own-department pinning — see §9's new
 `central-hub responsive/multi-device redesign` status bullet for the full

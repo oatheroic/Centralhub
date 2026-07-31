@@ -14,6 +14,7 @@ import {
 import { AttributeSelect } from "./components/AttributeSelect";
 import { AttributeValueManagerDialog } from "./components/AttributeValueManagerDialog";
 import { AppsPanel } from "./components/AppsPanel";
+import { AnnouncementsPanel } from "./components/AnnouncementsPanel";
 
 type AdminUser = {
   id: string;
@@ -666,6 +667,8 @@ function summarizeAuditDetail(row: AuditRow): string {
     }
     case "app.delete":
       return `${detail.name ?? row.appId ?? "unknown"} removed`;
+    case "announcement.create":
+      return `"${detail.title ?? ""}" sent to ${detail.recipientCount ?? "?"} user(s)`;
     default:
       return JSON.stringify(detail);
   }
@@ -682,6 +685,7 @@ const ACTION_LABELS: Record<string, string> = {
   "app.create": "App created",
   "app.update": "App updated",
   "app.delete": "App deleted",
+  "announcement.create": "Announcement",
 };
 
 function AuditPanel() {
@@ -762,7 +766,7 @@ function AuditPanel() {
   );
 }
 
-type Tab = "users" | "permissions" | "apps" | "audit";
+type Tab = "users" | "permissions" | "apps" | "audit" | "announce";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("users");
@@ -788,6 +792,9 @@ export default function App() {
             <Button variant={tab === "audit" ? "primary" : "secondary"} onClick={() => setTab("audit")}>
               Audit
             </Button>
+            <Button variant={tab === "announce" ? "primary" : "secondary"} onClick={() => setTab("announce")}>
+              Announce
+            </Button>
           </nav>
         }
       >
@@ -798,8 +805,10 @@ export default function App() {
             <PermissionsPanel />
           ) : tab === "apps" ? (
             <AppsPanel />
-          ) : (
+          ) : tab === "audit" ? (
             <AuditPanel />
+          ) : (
+            <AnnouncementsPanel />
           )}
         </div>
       </AppShell>

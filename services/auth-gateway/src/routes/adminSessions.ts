@@ -2,6 +2,7 @@ import { Router } from "express";
 import { requireSession, requireAdmin, type AuthedRequest } from "../middleware/requireAdmin.js";
 import { revokeUser } from "../revocation.js";
 import { recordAudit } from "../audit.js";
+import { createNotification } from "../notifications.js";
 
 export const adminSessionsRouter = Router();
 
@@ -31,6 +32,15 @@ adminSessionsRouter.put(
         action: "session.revoke",
         targetSub: userSub,
         targetName: name ?? null,
+      });
+      // The revoked user's own next request is a 401 -> login redirect, so
+      // they likely never see this live — created anyway so it's waiting in
+      // their history once they log back in with a fresh, unrevoked session.
+      void createNotification(userSub, {
+        sourceAppId: "central-hub",
+        type: "warning",
+        title: "Your session was ended by an administrator",
+        actorSub: req.session?.sub ?? null,
       });
       res.sendStatus(204);
     } catch (err) {

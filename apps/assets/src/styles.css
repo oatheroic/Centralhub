@@ -65,6 +65,13 @@ html, body {
   --color-border: var(--border);
   --color-text: var(--foreground);
   --color-text-muted: var(--muted-foreground);
+  /* NotificationBell (packages/ui) needs these three on top of the
+     text/text-muted/border aliases ThemeToggle already required — same
+     "map to the closest existing shadcn variable" approach, not new colors. */
+  --color-bg: var(--background);
+  --color-surface: var(--card);
+  --color-danger: var(--destructive);
+  --color-success: var(--status-emerald);
   --color-input: var(--input);
   --color-ring: var(--ring);
   --color-ring-offset-background: var(--background);

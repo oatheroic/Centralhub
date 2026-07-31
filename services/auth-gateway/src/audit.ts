@@ -21,7 +21,8 @@ export type AuditAction =
   | "attribute_value.delete"
   | "app.create"
   | "app.update"
-  | "app.delete";
+  | "app.delete"
+  | "announcement.create";
 
 // sub is null for system-driven rows (login/role-sync-poller reconciling
 // Keycloak realm roles) — there's no admin actor to attribute those to.

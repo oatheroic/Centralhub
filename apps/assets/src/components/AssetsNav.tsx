@@ -1,4 +1,4 @@
-import { ThemeToggle } from "@centralhub/ui";
+import { NotificationBell, ThemeToggle } from "@centralhub/ui";
 import "@centralhub/ui/tokens.css";
 
 // Not an import of packages/ui's compiled AppShell — this app's own
@@ -20,6 +20,7 @@ export function AssetsNav() {
       </a>
       <div className="flex items-center gap-3">
         <span className="text-sm font-semibold text-[rgb(var(--chub-text))]">Assets</span>
+        <NotificationBell />
         <ThemeToggle />
       </div>
     </header>

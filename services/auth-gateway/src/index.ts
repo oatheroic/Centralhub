@@ -23,6 +23,8 @@ import { dataTokenRouter } from "./routes/dataToken.js";
 import { roleLookupRouter } from "./routes/roleLookup.js";
 import { appsRouter } from "./routes/apps.js";
 import { adminAppsRouter } from "./routes/adminApps.js";
+import { notificationsRouter } from "./routes/notifications.js";
+import { adminAnnouncementsRouter } from "./routes/adminAnnouncements.js";
 
 const app = express();
 app.use(cookieParser());
@@ -53,6 +55,8 @@ app.use(dataTokenRouter);
 app.use(roleLookupRouter);
 app.use(appsRouter);
 app.use(adminAppsRouter);
+app.use(notificationsRouter);
+app.use(adminAnnouncementsRouter);
 
 async function start() {
   await migrate();

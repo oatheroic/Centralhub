@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { ArrowLeft } from "lucide-react";
 import { ThemeToggle } from "./ThemeToggle";
+import { NotificationBell } from "./NotificationBell";
 
 export function AppShell({
   title,
@@ -29,6 +30,7 @@ export function AppShell({
         </div>
         <div className="flex items-center gap-3">
           {actions}
+          <NotificationBell />
           <ThemeToggle />
         </div>
       </header>

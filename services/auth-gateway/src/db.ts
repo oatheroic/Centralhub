@@ -232,4 +232,51 @@ export async function migrate(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS audit_log_at_idx ON audit_log (at DESC);
   `);
+  // Platform notification primitive — one row per recipient, including
+  // fanned-out announcements, rather than a broadcast row + separate
+  // read-join table: every notification already has its own `read_at`, and
+  // recipient-subset targeting (department/role/specific-user) falls out
+  // for free from who a producer chose to insert a row for. `source_app_id`
+  // is 'central-hub' for every Phase 1 producer (all of which live inside
+  // auth-gateway itself); a future app-originated event (Phase 2, via its
+  // own outbox + POST /internal/notifications) would set its own app id.
+  // `dedupe_key` is optional and producer-chosen (e.g.
+  // `announce:<id>`) — re-firing the same logical event for the same
+  // recipient is then a no-op insert, not a stacked duplicate; see the
+  // partial unique index below and notifications.ts's fanOutNotification().
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS notifications (
+      id             BIGSERIAL PRIMARY KEY,
+      recipient_sub  TEXT        NOT NULL,
+      source_app_id  TEXT        NOT NULL,
+      type           TEXT        NOT NULL DEFAULT 'info'
+                       CHECK (type IN ('info','success','warning','action_required')),
+      title          TEXT        NOT NULL,
+      body           TEXT,
+      link           TEXT,
+      actor_sub      TEXT,
+      dedupe_key     TEXT,
+      read_at        TIMESTAMPTZ,
+      created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+  // Hot path: "my unread count" and "my history newest-first".
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS notifications_recipient_idx
+      ON notifications (recipient_sub, created_at DESC);
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS notifications_recipient_unread_idx
+      ON notifications (recipient_sub) WHERE read_at IS NULL;
+  `);
+  // Partial unique index (only when dedupe_key is set) — a re-fired event
+  // for the same recipient is an idempotent no-op insert. Because this is a
+  // *partial* index, every INSERT that wants to use it as an ON CONFLICT
+  // arbiter must repeat the same WHERE predicate on the ON CONFLICT clause
+  // itself (see fanOutNotification()) — Postgres won't infer a partial
+  // index as the arbiter otherwise.
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS notifications_dedupe_idx
+      ON notifications (recipient_sub, dedupe_key) WHERE dedupe_key IS NOT NULL;
+  `);
 }

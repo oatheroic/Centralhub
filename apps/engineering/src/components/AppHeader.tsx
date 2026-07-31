@@ -1,5 +1,5 @@
 import { ArrowLeft, Wrench } from "lucide-react";
-import { ThemeToggle } from "@centralhub/ui";
+import { NotificationBell, ThemeToggle } from "@centralhub/ui";
 import { useAuth } from "@/hooks/useAuth";
 import { ROLE_LABEL } from "@/lib/auth-utils";
 import "@centralhub/ui/tokens.css";
@@ -42,7 +42,10 @@ export function AppHeader({ subtitle }: { subtitle?: string }) {
             </div>
           </div>
         </div>
-        <ThemeToggle />
+        <div className="flex items-center gap-1">
+          <NotificationBell />
+          <ThemeToggle />
+        </div>
       </div>
     </header>
   );

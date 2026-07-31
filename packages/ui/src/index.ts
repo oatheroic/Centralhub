@@ -16,3 +16,11 @@ export type { DataTableColumn, DataTableProps } from "./components/DataTable";
 export { ThemeToggle } from "./components/ThemeToggle";
 export { getStoredTheme, applyTheme, setStoredTheme } from "./theme";
 export type { Theme } from "./theme";
+export { NotificationBell } from "./components/NotificationBell";
+export {
+  fetchNotifications,
+  fetchUnreadCount,
+  markAllNotificationsRead,
+  markNotificationRead,
+} from "./notifications";
+export type { NotificationItem, NotificationType } from "./notifications";

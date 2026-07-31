@@ -18,9 +18,13 @@
 //               RLS enforcement, ensure_profile() provisioning, the
 //               self-lockout / admin-override-write guard
 //   - §12       (inference gateway)             -- reachable only when authenticated
+//   - Notifications (platform primitive)        -- read-API isolation, permission-
+//                                                   grant (single + bulk) and session-
+//                                                   revoke producers, admin announcement
+//                                                   fan-out, mark-read/read-all
 //
 // Deliberately NOT covered (see README §13 "Deferred / not started"): MFA,
-// per-record permissions, bulk grants, audit log, per-session (jti)
+// per-record permissions, audit log, per-session (jti)
 // tracking. Nothing here should test for those. The background role
 // re-sync poller (§8) is built but also isn't covered here — its effect
 // only becomes observable after waiting out a full ROLE_SYNC_INTERVAL_MS
@@ -530,6 +534,190 @@ async function main() {
     // earlier in this run -- a genuine in-use check, not an empty app.
     const res = await hop(admin, `${GATEWAY}/auth/admin/apps/marketing`, { method: "DELETE" });
     ok("DELETE in-use app -> 409", res.status === 409, `status ${res.status}`);
+  });
+
+  // -- 6d. Notifications (platform primitive) --------------------------------
+  // Delta-based, not absolute-count, assertions throughout: this suite is
+  // meant to be rerunnable against the same persistent stack without a
+  // restart, and notification rows (unlike the throwaway rows 6b/6c create
+  // and delete) accumulate as real history -- so "did exactly one new X
+  // appear" is asserted as a count delta around each action, the same way
+  // §8 (RLS) flips a permission then restores it rather than assuming a
+  // fresh table.
+  section("6d. Notifications — read-API isolation and producer wiring");
+
+  function countByTitle(list, needle) {
+    return (list || []).filter((n) => n.title?.includes(needle)).length;
+  }
+
+  await must("read APIs require a session and isolate by recipient", async () => {
+    const anonList = await getJson(makeJar(), `${GATEWAY}/auth/notifications`);
+    ok("anonymous GET /auth/notifications -> 401", anonList.status === 401, `status ${anonList.status}`);
+
+    const anonCount = await getJson(makeJar(), `${GATEWAY}/auth/notifications/count`);
+    ok("anonymous GET /auth/notifications/count -> 401", anonCount.status === 401, `status ${anonCount.status}`);
+
+    const userList = await getJson(user, `${GATEWAY}/auth/notifications`);
+    ok("dev-user GET /auth/notifications -> 200 array", userList.status === 200 && Array.isArray(userList.body), `status ${userList.status}`);
+  });
+
+  await must("a single permission grant notifies on a real false->true transition, not on every toggle", async () => {
+    async function setFinanceRead(value) {
+      return getJson(admin, `${GATEWAY}/auth/admin/permissions/${userSub}/finance`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ read: value, write: false, edit: false, delete: false, userName: "dev-user" }),
+      });
+    }
+
+    // Force a known starting point -- dev-user's finance read may already be
+    // true here from a previous run against this same stack.
+    await setFinanceRead(false);
+    const before = await getJson(user, `${GATEWAY}/auth/notifications`);
+    const beforeCount = countByTitle(before.body, "Finance");
+
+    const grant = await setFinanceRead(true);
+    ok("grant read:true -> 204", grant.status === 204, `status ${grant.status}`);
+    const afterGrant = await getJson(user, `${GATEWAY}/auth/notifications`);
+    ok(
+      "exactly one new Finance-access notification appeared",
+      countByTitle(afterGrant.body, "Finance") === beforeCount + 1,
+      `before ${beforeCount}, after ${countByTitle(afterGrant.body, "Finance")}`,
+    );
+    ok(
+      "it links to /apps/finance/",
+      afterGrant.body?.[0]?.link === "/apps/finance/",
+      JSON.stringify(afterGrant.body?.[0]),
+    );
+
+    // Re-granting an already-true read is a no-op transition -- must not
+    // duplicate the notification.
+    await setFinanceRead(true);
+    const afterRegrant = await getJson(user, `${GATEWAY}/auth/notifications`);
+    ok(
+      "re-granting an already-granted read does not duplicate the notification",
+      countByTitle(afterRegrant.body, "Finance") === beforeCount + 1,
+      `count ${countByTitle(afterRegrant.body, "Finance")}`,
+    );
+
+    // Restore the deny-all baseline section 4/5 (and a future run of this
+    // suite) depend on.
+    await setFinanceRead(false);
+  });
+
+  await must("a bulk permission grant notifies only newly-granted users", async () => {
+    async function setAssetsReadBulk(value) {
+      return getJson(admin, `${GATEWAY}/auth/admin/permissions/bulk`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ userSubs: [userSub], appId: "assets", patch: { read: value } }),
+      });
+    }
+
+    // Unlike finance (dev-user's documented deny-all demo state, see the
+    // grant test above), dev-user's assets read is genuinely seeded true
+    // (permissions.ts's seedDevPermissions -- sections 7/8 depend on it) --
+    // so this must snapshot and restore the real original value, not
+    // hardcode false at the end, or every run after the first one would
+    // permanently strip dev-user's assets access.
+    const original = await getJson(user, `${GATEWAY}/auth/permissions?app=assets`);
+    const originalRead = original.body?.read === true;
+
+    await setAssetsReadBulk(false);
+    const before = await getJson(user, `${GATEWAY}/auth/notifications`);
+    const beforeCount = countByTitle(before.body, "Assets");
+
+    const bulk = await setAssetsReadBulk(true);
+    ok("bulk grant read:true -> 204", bulk.status === 204, `status ${bulk.status}`);
+    const afterGrant = await getJson(user, `${GATEWAY}/auth/notifications`);
+    ok(
+      "exactly one new Assets-access notification appeared",
+      countByTitle(afterGrant.body, "Assets") === beforeCount + 1,
+      `before ${beforeCount}, after ${countByTitle(afterGrant.body, "Assets")}`,
+    );
+
+    await setAssetsReadBulk(true);
+    const afterRegrant = await getJson(user, `${GATEWAY}/auth/notifications`);
+    ok(
+      "bulk-regranting an already-granted read does not duplicate",
+      countByTitle(afterRegrant.body, "Assets") === beforeCount + 1,
+      `count ${countByTitle(afterRegrant.body, "Assets")}`,
+    );
+
+    await setAssetsReadBulk(originalRead);
+  });
+
+  await must("session revoke notifies the user, visible once they log back in", async () => {
+    const revoke = await hop(admin, `${GATEWAY}/auth/admin/sessions/${userSub}/revoke`, { method: "PUT" });
+    ok("admin revokes dev-user's session -> 204", revoke.status === 204, `status ${revoke.status}`);
+
+    // dev-user's session is now dead (see section 11's own revoke test for
+    // the 401/302 assertions on that) -- re-login to get a fresh one before
+    // reading their own history, and so section 11 still has a live session
+    // to revoke later in this same run.
+    await keycloakLogin(user, DEV_USER);
+    const afterRelogin = await getJson(user, `${GATEWAY}/auth/notifications`);
+    ok(
+      "a 'session was ended' notification is present after logging back in",
+      (afterRelogin.body || []).some((n) => n.title?.includes("session was ended")),
+      JSON.stringify(afterRelogin.body?.map((n) => n.title)),
+    );
+  });
+
+  await must("admin announcement fans out to every user, including the admin themselves", async () => {
+    const marker = `Test-stack announcement ${Date.now()}`;
+    const announce = await getJson(admin, `${GATEWAY}/auth/admin/announcements`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: marker, body: "sent by scripts/test-stack.mjs" }),
+    });
+    ok("POST /auth/admin/announcements -> 204", announce.status === 204, `status ${announce.status}`);
+
+    const userList = await getJson(user, `${GATEWAY}/auth/notifications`);
+    ok("dev-user received it", (userList.body || []).some((n) => n.title === marker), JSON.stringify(userList.body?.map((n) => n.title)));
+
+    const adminList = await getJson(admin, `${GATEWAY}/auth/notifications`);
+    ok("dev-admin (also a recipient) received it", (adminList.body || []).some((n) => n.title === marker), JSON.stringify(adminList.body?.map((n) => n.title)));
+
+    const nonAdmin = await getJson(user, `${GATEWAY}/auth/admin/announcements`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "should be rejected" }),
+    });
+    ok("dev-user POST /auth/admin/announcements -> 403", nonAdmin.status === 403, `status ${nonAdmin.status}`);
+  });
+
+  await must("mark-read is per-recipient, and read-all clears the unread count", async () => {
+    const list = await getJson(user, `${GATEWAY}/auth/notifications`);
+    const target = (list.body || []).find((n) => !n.readAt);
+    ok("dev-user has at least one unread notification to test against", Boolean(target), JSON.stringify(list.body?.length));
+    if (!target) return;
+
+    const crossRead = await hop(admin, `${GATEWAY}/auth/notifications/${target.id}/read`, { method: "POST" });
+    ok("dev-admin marking dev-user's notification read -> 404", crossRead.status === 404, `status ${crossRead.status}`);
+
+    const ownRead = await hop(user, `${GATEWAY}/auth/notifications/${target.id}/read`, { method: "POST" });
+    ok("dev-user marking their own notification read -> 204", ownRead.status === 204, `status ${ownRead.status}`);
+
+    const missingRead = await hop(user, `${GATEWAY}/auth/notifications/999999999/read`, { method: "POST" });
+    ok("marking a nonexistent id -> 404", missingRead.status === 404, `status ${missingRead.status}`);
+
+    const readAll = await hop(user, `${GATEWAY}/auth/notifications/read-all`, { method: "POST" });
+    ok("read-all -> 204", readAll.status === 204, `status ${readAll.status}`);
+
+    const countAfter = await getJson(user, `${GATEWAY}/auth/notifications/count`);
+    ok("unread count is 0 after read-all", countAfter.body?.unread === 0, JSON.stringify(countAfter.body));
+  });
+
+  await must("/internal/notifications is not reachable through the public gateway", async () => {
+    // Nginx has no location for /internal/* besides /internal/verify(-admin)
+    // (both marked `internal;`) -- an external request for
+    // /internal/notifications falls through to whichever generic location
+    // matches the path first, gated the normal way, and never reaches
+    // auth-gateway's real handler. It must NOT come back as a bare 204
+    // (which would mean it actually hit the notifications route).
+    const res = await hop(makeJar(), `${GATEWAY}/internal/notifications`, { method: "POST" });
+    ok("POST /internal/notifications via the gateway is not a 204", res.status !== 204, `status ${res.status}`);
   });
 
   // -- 7. apps/assets: data-token + identity->role_code mapping (§10) -------

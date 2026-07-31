@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Search } from "lucide-react";
-import { Button, EmptyState, Input, Skeleton, ThemeToggle } from "@centralhub/ui";
+import { Button, EmptyState, Input, NotificationBell, Skeleton, ThemeToggle } from "@centralhub/ui";
 import type { AppRegistryEntry } from "./registry/apps";
 import { useAppRegistry } from "./lib/useAppRegistry";
 import { fetchSession, type SessionUser } from "./lib/auth";
@@ -119,7 +119,10 @@ export default function App() {
               Entry point for every department mini-app.
             </p>
           </div>
-          <ThemeToggle />
+          <div className="flex items-center gap-2">
+            <NotificationBell />
+            <ThemeToggle />
+          </div>
         </header>
 
         {announcement && <SystemBanner id={announcement.id} message={announcement.message} />}
