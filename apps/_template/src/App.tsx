@@ -1,7 +1,15 @@
 import { useState } from "react";
-import { AppShell, Button, Card } from "@centralhub/ui";
+import { AppShell, Button, Card, ToastProvider } from "@centralhub/ui";
 
 export default function App() {
+  return (
+    <ToastProvider>
+      <AppContent />
+    </ToastProvider>
+  );
+}
+
+function AppContent() {
   const [status, setStatus] = useState<string>("idle");
 
   async function pingInferenceGateway() {

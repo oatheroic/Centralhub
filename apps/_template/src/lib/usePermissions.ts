@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useToast } from "@centralhub/ui";
 
 // Copy this file into a new app's src/lib/ and set APP_ID to match the
 // app's id (the same id used for the app-<id> compose service and the
@@ -25,20 +26,26 @@ export function usePermissions(): { permissions: PermissionSet | null; loading: 
 }
 
 // Wraps a mutating handler so it only runs if the current user holds the
-// given permission for this app; otherwise it alerts and does nothing.
-// This is a UX guard, not the security boundary — read access is already
-// enforced server-side by Nginx before this app ever loads, but write/edit/
-// delete are app-internal actions the gateway has no visibility into, so
-// each app's own backend (once it has real mutating endpoints) must still
-// re-check permissions server-side too.
+// given permission for this app; otherwise it shows a toast and does
+// nothing. This is a UX guard, not the security boundary — read access is
+// already enforced server-side by Nginx before this app ever loads, but
+// write/edit/delete are app-internal actions the gateway has no visibility
+// into, so each app's own backend (once it has real mutating endpoints)
+// must still re-check permissions server-side too. Requires a ToastProvider
+// ancestor (see App.tsx).
 export function useGuardedAction<Args extends unknown[]>(
   permissions: PermissionSet | null,
   verb: Verb,
   action: (...args: Args) => void | Promise<void>,
 ): (...args: Args) => void {
+  const toast = useToast();
   return (...args: Args) => {
     if (!permissions?.[verb]) {
-      window.alert(`You don't have "${verb}" permission for this app.`);
+      toast.show({
+        title: "Permission denied",
+        description: `You don't have "${verb}" permission for this app.`,
+        tone: "danger",
+      });
       return;
     }
     void action(...args);

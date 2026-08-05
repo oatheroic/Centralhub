@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useToast } from "@centralhub/ui";
 
 // Copied from apps/_template/src/lib/usePermissions.ts — see that file's
 // header comment for the wiring checklist when scaffolding a new app.
@@ -26,9 +27,14 @@ export function useGuardedAction<Args extends unknown[]>(
   verb: Verb,
   action: (...args: Args) => void | Promise<void>,
 ): (...args: Args) => void {
+  const toast = useToast();
   return (...args: Args) => {
     if (!permissions?.[verb]) {
-      window.alert(`You don't have "${verb}" permission for this app.`);
+      toast.show({
+        title: "Permission denied",
+        description: `You don't have "${verb}" permission for this app.`,
+        tone: "danger",
+      });
       return;
     }
     void action(...args);

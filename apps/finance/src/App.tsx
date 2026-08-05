@@ -1,10 +1,18 @@
 import { useEffect, useState } from "react";
-import { AppShell, Button, Card } from "@centralhub/ui";
+import { AppShell, Button, Card, ToastProvider } from "@centralhub/ui";
 import { usePermissions, useGuardedAction, useReadGuard } from "./lib/usePermissions";
 
 type SessionUser = { name: string; email: string };
 
 export default function App() {
+  return (
+    <ToastProvider>
+      <AppContent />
+    </ToastProvider>
+  );
+}
+
+function AppContent() {
   const [user, setUser] = useState<SessionUser | null | undefined>(undefined);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
   const { permissions, loading } = usePermissions();

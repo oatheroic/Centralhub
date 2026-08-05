@@ -526,8 +526,22 @@ first- vs. third-party by fiat**.
   persistent "back to Central Hub" link instead of relying on browser back —
   their "Access denied" click-anywhere view keeps its exact behavior, just
   restyled onto tokens. `usePermissions.ts`'s `window.alert()` (still
-  duplicated across `_template`/`marketing`/`finance`) is deliberately
-  untouched — a separate, already-deferred cleanup, not part of this pass.
+  duplicated across `_template`/`marketing`/`finance`) was deliberately left
+  untouched in this pass — see the toast follow-up below.
+- **`usePermissions.ts`'s `window.alert()` → toast** (follow-up session):
+  `useGuardedAction`'s denial path now calls `useToast().show(...)` (a danger
+  toast) instead of `window.alert()`, in all three duplicated copies of the
+  file (`apps/_template`, `apps/marketing`, `apps/finance`) — no extraction
+  into `packages/ui` needed, since `useToast` is already a shared hook each
+  file can import directly; the file stays a per-app copy by the same
+  intentional-duplication convention as the rest of Pillar 1. Since
+  `useGuardedAction` calls `useToast()` (a hook) during its own execution, its
+  caller must render under a `ToastProvider` ancestor — `marketing`'s and
+  `finance`'s `App.tsx` (which use it today) and `_template`'s `App.tsx`
+  (which doesn't yet, but is the copy source for future apps) were all split
+  into an outer `App` that wraps a `ToastProvider` around the real content,
+  mirroring the pattern `apps/admin` already used. Verified with `tsc -b` and
+  a production `vite build` in all three apps.
 - **Status**: done — shared foundation, admin panel, and landing page/
   department-app rollout all complete; every app in the repo is now on
   `packages/ui`. Grouping and a dismissible announcement banner (previously
@@ -1660,7 +1674,6 @@ specific to `apps/engineering` (§10b), then everything else.
 | Per-record / field-level permissions | `app_permissions` table design | Current granularity is per (user, app) only |
 | Per-session (`jti`) tracking / "your active sessions" UI | `session_revocations` table design | Current granularity is per-user (kill all sessions), not per-device — see §8 |
 | Production-safe credentials | `keycloak/realm-export.json`, `.env` | `dev-admin`/`dev-user`/client secret are dev-only seed data — see §6, §7 |
-| `usePermissions.ts`'s `window.alert()` → toast | `apps/_template`, `apps/marketing`, `apps/finance` | Duplicated across 3 files by design (§9); a real fix needs extracting the hook into `packages/ui` first, out of scope for §9's UI-primitives pass |
 | Replace app-local department vocabularies with CentralHub's official `attribute_values` list directly, retiring alias/mapping tables | `apps/engineering`'s own `departments` table (and `DeptAliasSection`'s mapping into it); the equivalent for `apps/assets`'s department-shaped demo data (`cc_recipient`/`recipient`) | `apps/engineering`'s `departments` is a real FK'd entity (machines, repair jobs, profiles reference `department_id`), so collapsing it onto `attribute_values` means either migrating those FKs to reference names directly or a synced mirror table — materially larger than the CRUD/dropdown work above, which only touched the CentralHub-side picker, not each app's own department model |
 | `apps/admin` responsive/multi-device redesign | `apps/admin/src/App.tsx` (4 inline `DataTable`-heavy panels: Permissions, Users, Audit), `components/AppsPanel.tsx`, shared `packages/ui/src/components/AppShell.tsx` header | `central-hub`'s landing page got a full responsive pass (§9); admin is still desktop-first (no admin-authored breakpoints beyond `AppShell`'s incidental `p-4 sm:p-6 lg:p-8`). Meaningfully bigger scope than central-hub's card-grid rework — `DataTable` has no card/stacked-row fallback, so each of the 4 tables would need its own narrow-viewport treatment, not just header/spacing polish. Deferred to its own session by request |
 | Notifications: realtime delivery (SSE/WebSocket) | services/auth-gateway's `routes/notifications.ts`, `packages/ui`'s `NotificationBell` | v1 is polling only (30s, paused on a hidden tab) — no realtime infra exists in this repo for anything, and one feature isn't reason enough to add it. The read endpoints are shaped so an SSE stream could be added on top without changing them |
