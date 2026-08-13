@@ -150,9 +150,14 @@ export async function seedDevPermissions(maxAttempts = 45, delayMs = 2000): Prom
       await seedRow("dev-admin", "finance", fullAccess);
       await seedRow("dev-admin", "assets", fullAccess);
       await seedRow("dev-admin", "engineering", fullAccess);
+      await seedRow("dev-admin", "resource-booking", fullAccess);
       await seedRow("dev-user", "marketing", { read: true, write: true });
       await seedRow("dev-user", "assets", { read: true, write: true });
       await seedRow("dev-user", "engineering", { read: true, write: true });
+      // dev-user gets read+write (book/cancel own bookings) but not
+      // edit/delete (room management) — demonstrates the "Manage rooms"
+      // panel staying hidden for a non-admin.
+      await seedRow("dev-user", "resource-booking", { read: true, write: true });
       // dev-user gets no row at all for finance — default-deny demonstrates
       // the permission-denied redirect page.
       // dev-user2..5: same shape as dev-user, added so §10b's engineering

@@ -19,7 +19,7 @@ small, mechanical, well-documented change — never a rearchitecture.
 | 3 | Real authentication (Keycloak + auth-gateway) + admin gate | Done |
 | 4 | Granular per-app RBAC (read/write/edit/delete) | Done (foundational) |
 | 5 | Instant session/role revocation | Done |
-| — | Real per-app backends, production hardening | Not started (see §13) |
+| — | Real per-app backends, production hardening | Started — `apps/resource-booking` (§10e) is the first app with a real backend; production hardening not started (see §13) |
 
 ---
 
@@ -40,22 +40,32 @@ CentralHub/
 │   │                             # storage-assets in docker-compose.yml), not a shared
 │   │                             # database or a cloud dependency; archive/ holds dated
 │   │                             # snapshots of the raw export for future diffing (§10c/§10d)
-│   └── engineering/              # Second third-party app (§10b) — Lovable export with
-│                                  # real Supabase Auth + real RLS (unlike assets' USING
-│                                  # (true) gap), now CentralHub-gated the same way, with
-│                                  # its own self-hosted Postgres/PostgREST/storage-api
-│                                  # (engineering-db, postgrest-engineering,
-│                                  # storage-engineering); archive/ holds dated snapshots
-│                                  # of the raw export for future diffing (§10c/§10d)
+│   ├── engineering/              # Second third-party app (§10b) — Lovable export with
+│   │                              # real Supabase Auth + real RLS (unlike assets' USING
+│   │                              # (true) gap), now CentralHub-gated the same way, with
+│   │                              # its own self-hosted Postgres/PostgREST/storage-api
+│   │                              # (engineering-db, postgrest-engineering,
+│   │                              # storage-engineering); archive/ holds dated snapshots
+│   │                              # of the raw export for future diffing (§10c/§10d)
+│   └── resource-booking/         # First-party app (§10e) — room booking, the first app
+│                                  # in this repo with a real mutating backend; its own
+│                                  # dedicated Postgres (booking-db) but no PostgREST/
+│                                  # storage-api — uses the native permission gate (§7)
+│                                  # instead of minted-JWT/RLS, since it's trusted
+│                                  # first-party code, not a third-party export
 ├── packages/
 │   └── ui/                    # Shared design tokens, Tailwind preset, and React
 │                                # primitives (§9) — consumed via workspace:*
 ├── services/
 │   ├── inference-gateway/     # Single internal API all apps call for LLM access.
 │   │                           # Proxies to Claude today, swaps to a local model later.
-│   └── auth-gateway/          # OIDC relying party for Keycloak; issues chub_session;
-│                               # target of Nginx's auth_request gate; also owns the
-│                               # app_permissions table (per-app read/write/edit/delete).
+│   ├── auth-gateway/          # OIDC relying party for Keycloak; issues chub_session;
+│   │                           # target of Nginx's auth_request gate; also owns the
+│   │                           # app_permissions table (per-app read/write/edit/delete).
+│   └── booking-api/           # apps/resource-booking's own backend (§10e) — Express +
+│                                # its own Postgres, forwards the caller's session cookie
+│                                # to auth-gateway's /session/verify-permission before
+│                                # any write/edit/delete (the native gate, §7).
 ├── keycloak/
 │   ├── realm-export.json      # Pre-provisioned realm/roles/client/seed users
 │   └── themes/centralhub/     # Custom login theme (CSS-only override)
@@ -1506,6 +1516,105 @@ whoever does the next update.
 
 ---
 
+## 10e. First real per-app backend (`apps/resource-booking`, `services/booking-api`)
+
+- **Objective**: close the gap every earlier section only ever described —
+  §7 built `GET /session/verify-permission` (the "native gate") and §13
+  tracked "real mutating backend per app" as not started, since
+  `marketing`/`finance` only ever mutated local React state. Resource
+  booking is a small, genuinely useful app (book a room, see what's already
+  reserved) that gives that endpoint its first real caller.
+- **Why native gate, not minted-JWT/RLS**: per §7's "Choosing an enforcement
+  model" decision tree — this is first-party code CentralHub controls
+  (unlike `assets`/`engineering`, Lovable exports that needed row-level
+  enforcement *below* untrusted app code), app-level granularity is enough
+  (no per-record rules needed), and instant revocation matters more than a
+  15-minute-stale token would allow. So `booking-api` forwards the caller's
+  `chub_session` cookie directly to auth-gateway's existing
+  `/session/verify-permission?app=resource-booking&verb=<write|edit|delete>`
+  before any mutation — no new auth-gateway endpoint, no shared JWT secret,
+  no PostgREST/storage-api layer.
+- **Architecture**:
+  - `booking-db` — a dedicated Postgres, sibling to `db`/`assets-db`/
+    `engineering-db` (per-app-owns-its-data), but with no PostgREST in front
+    of it — `booking-api` (a plain Express service, modeled on
+    `services/auth-gateway`'s structure: same `Pool` + `connectionTimeoutMillis`
+    + `connectWithRetry` + idempotent `migrate()` pattern) talks to it
+    directly.
+  - `resources` (rooms) and `bookings` tables. Double-booking is prevented
+    at the database layer, not just in application code — a Postgres
+    `EXCLUDE USING gist` constraint on `(resource_id WITH =,
+    tstzrange(starts_at, ends_at) WITH &&)` (requiring the `btree_gist`
+    extension) makes two overlapping bookings for the same room mutually
+    exclusive even under a concurrent-request race; `booking-api` catches
+    the resulting `23P01 exclusion_violation` and translates it to a `409`.
+  - `services/booking-api/src/auth.ts`: `resolveIdentity` resolves the
+    caller's `sub`/`name` by forwarding their cookie to auth-gateway's
+    existing `GET /me` (needed for `user_sub` on new bookings and for
+    filtering "my bookings"); `requireVerb(verb)` / `checkVerb(cookie, verb)`
+    call `/session/verify-permission`. Read access itself is already
+    enforced ahead of this service by Nginx's `auth_request` gate on
+    `/apps/resource-booking/` — this service only ever re-checks
+    write/edit/delete.
+  - A user can always cancel **their own** booking regardless of the
+    `delete` verb (`DELETE /bookings/:id` compares `user_sub` first);
+    canceling someone else's booking (an admin override) still requires
+    `delete`.
+  - `gateway/conf.d/default.conf`: `location ^~ /apps/resource-booking/api/`
+    — same `^~`-prefix-wins-over-regex shape as the `assets`/`engineering`
+    data-API blocks (§10), proxying to `booking-api` instead of a
+    PostgREST/storage-api pair, and with no bearer-token forwarding since
+    this service trusts the forwarded session cookie, not a minted JWT.
+  - Registered the same way every app is (§3 step 4): `app.manifest.json`
+    only, picked up by the existing manifest-sync mechanism (§12b) — no
+    `KNOWN_APPS`-style edit anywhere. `services/auth-gateway/src/permissions.ts`'s
+    `seedDevPermissions()` gained two more `seedRow()` calls (dev-admin: full
+    access; dev-user: read+write only, no edit/delete) purely as demo data,
+    the same pattern every other app's dev seed follows.
+- **Frontend** (`apps/resource-booking`, scaffolded from `apps/_template`):
+  a day-view booking board (date navigation with prev/next/today, a booking
+  form defaulting to the next upcoming hour — not a fixed time, which used
+  to silently book an already-past slot whenever tested later in the day —
+  per-room capacity/location badges and a live "Free now"/"In use" status
+  badge computed against the current time, booking chips instead of plain
+  text rows) plus an admin-only "Manage rooms" panel (rendered only when
+  `edit`/`delete` is granted). Canceling a booking and deleting a room both
+  go through `packages/ui`'s `ConfirmDialog` — the same "higher-stakes,
+  harder-to-undo action gets a confirm step" convention §9 established for
+  admin's session-revoke button — rather than acting immediately.
+- **Past-time validation, both layers**: the booking form checks the start
+  time isn't already in the past before submitting (immediate feedback, no
+  round-trip); `booking-api`'s `POST /bookings` independently rejects it
+  too (`400`), since the client check is a UX guard only, not the real
+  gate — found live while manually testing: a hardcoded default time
+  silently created a technically-valid-but-already-past booking that then
+  never appeared in "Your upcoming bookings" (deliberately time-filtered,
+  `ends_at > now()`) with nothing explaining why.
+- **Status**: done — backend, frontend, RBAC wiring, and the UI polish pass
+  above are all live and verified against the real stack (real Keycloak
+  logins, a real double-booking 409, a real past-time 400, dev-user
+  confirmed unable to manage rooms or cancel dev-admin's booking but always
+  able to cancel their own); `scripts/test-stack.mjs` extended with an
+  11-assertion section covering the native-gate permission boundary, the
+  double-booking 409, and the self-cancel-vs-admin-override distinction
+  — 137/137 passing.
+- **Gotcha worth recording**: both `gateway` and `auth-gateway` bake their
+  config/code into the image at build time (`COPY conf.d/`,
+  `COPY services/auth-gateway`) — editing `gateway/conf.d/default.conf` or
+  `services/auth-gateway/src/permissions.ts` on a running stack does
+  **nothing** until those two images are explicitly rebuilt
+  (`docker compose build gateway auth-gateway`) and their containers
+  recreated. Missing this produced a confusing false signal while verifying
+  this app: new Nginx routes and new seed-permission rows silently didn't
+  take effect, surfacing as 404s (routing fell through to the frontend's
+  own static Nginx) and 403s (`app_permissions` had no row yet) that looked
+  like application bugs but were a stale-image issue.
+- **Deferred / not built**: no equipment booking (rooms only, by design —
+  see the UI/UX discussion this session), no recurring bookings, no
+  org-wide room-utilization reporting.
+
+---
+
 ## 11. Apps in this repo
 
 | App | Package | URL | Purpose |
@@ -1517,6 +1626,7 @@ whoever does the next update.
 | `apps/admin` | `@apps/admin` | `/apps/admin/` | Keycloak user list (with a per-user "Revoke session" action, §8, now confirm-gated, §9) + permissions matrix editor (§7). Linked from `central-hub`'s landing grid only for users holding the `admin` role (§9) — that's a discoverability nicety, not the real protection: the `admin`-role Nginx gate is what actually stops access. |
 | `apps/assets` | `@apps/assets` | `/apps/assets/` | First third-party/self-hosted app (§10) — asset purchase requests, registration, transfers; its own Postgres/PostgREST/storage-api, no external SaaS dependency. |
 | `apps/engineering` | `@apps/engineering` | `/apps/engineering/` | Second third-party/self-hosted app (§10b) — machine repair job workflow (report/assign/repair/review); its own Postgres/PostgREST/storage-api, no external SaaS dependency. |
+| `apps/resource-booking` | `@apps/resource-booking` | `/apps/resource-booking/` | First-party app (§10e) — room booking; the first app in this repo with a real mutating backend (`services/booking-api`), using the native permission gate (§7) instead of minted-JWT/RLS. |
 
 This table itself is still maintained by hand (it's prose, not the registry) —
 but the dashboard entry, permission-matrix participation, and admin role-code
@@ -1669,8 +1779,8 @@ specific to `apps/engineering` (§10b), then everything else.
 | Item | Where it would live | Why deferred |
 |---|---|---|
 | MFA / password reset / self-registration | Keycloak realm config | Out of scope for a local dev foundational slice |
-| Real mutating backend per app | each `apps/<name>` | No app has real data to mutate yet — demo actions are local state only |
-| Server-side enforcement of write/edit/delete | app-specific backend, calling `/session/verify-permission` | Nothing to enforce until an app has a real endpoint |
+| Real mutating backend per app | each `apps/<name>` | Done for `apps/resource-booking` (§10e) — the first app with one. `marketing`/`finance` still have none; their demo actions remain local state only |
+| Server-side enforcement of write/edit/delete | app-specific backend, calling `/session/verify-permission` | Done — `services/booking-api` (§10e) is the first real caller of the native gate this section originally only described |
 | Per-record / field-level permissions | `app_permissions` table design | Current granularity is per (user, app) only |
 | Per-session (`jti`) tracking / "your active sessions" UI | `session_revocations` table design | Current granularity is per-user (kill all sessions), not per-device — see §8 |
 | Production-safe credentials | `keycloak/realm-export.json`, `.env` | `dev-admin`/`dev-user`/client secret are dev-only seed data — see §6, §7 |
@@ -1948,7 +2058,59 @@ pnpm stack:up
 For whoever (human or agent) picks this repo up next — what changed most
 recently, and where to look first.
 
-**What just happened**: built the platform notification system described in
+**What just happened**: built `apps/resource-booking` + `services/booking-api`
+(§10e) — a room-booking app, and the first app in this repo with a real
+mutating backend, closing a gap every earlier section only ever described
+(§7's native gate had no caller; §13 tracked "real mutating backend per app"
+as not started). Came out of an open-ended ideation conversation (explored
+several general-productivity mini-app ideas — a people directory/org chart
+was the other finalist, deliberately scoped down and left as a separate
+plan file for a future session rather than built here) before narrowing to
+this one and a concrete implementation plan. Architecture: `booking-db`
+(own dedicated Postgres, no PostgREST/storage-api layer — this is trusted
+first-party code, not a third-party export, so it uses the native
+`/session/verify-permission` gate instead of minted-JWT/RLS), `booking-api`
+(plain Express, mirrors `auth-gateway`'s `Pool`/`connectWithRetry`/`migrate()`
+pattern), a `bookings` table with a Postgres `EXCLUDE USING gist` constraint
+making double-booking impossible at the DB layer (not just checked in
+application code), and a day-view frontend. Followed up with a manual
+live-testing pass (not just the automated suite) that surfaced two real
+bugs: (1) a hardcoded `09:00–10:00` form default silently created
+already-past bookings when tested later in the day, invisible in "upcoming"
+with no explanation — fixed with a next-upcoming-hour default plus
+past-time rejection on both the client and server; (2) a UI/UX pass adding
+confirm dialogs (cancel booking, delete room — previously no confirmation
+on either), capacity/location badges, live room status ("Free now"/"In
+use"), booking chips, and date navigation. See §10e for the full writeup,
+including a deployment gotcha worth reading before touching `gateway/` or
+`auth-gateway/` again: both bake their config/code into the Docker image at
+build time, so editing `gateway/conf.d/default.conf` or
+`services/auth-gateway/src/permissions.ts` does nothing on a running stack
+until those specific images are rebuilt and recreated — this produced a
+confusing false signal (404s and 403s that looked like application bugs)
+while first verifying this feature.
+
+**Verification**: `scripts/test-stack.mjs` extended with an 11-assertion
+"10b" section (native-gate permission boundary for both verbs, the
+double-booking 409, self-cancel-vs-admin-override) — 137/137 passing
+against the live stack. Also verified by hand: real Keycloak logins as
+both dev users, a real 409 on an overlapping booking, a real 400 on a
+past-time booking, dev-user confirmed unable to reach room management or
+cancel dev-admin's booking but always able to cancel their own.
+
+**Files touched this session**: new `apps/resource-booking/` (full app,
+scaffolded from `apps/_template`) and `services/booking-api/` (full
+service); `environments/docker-compose.yml` (three new services:
+`booking-db`, `booking-api`, `app-resource-booking`), `environments/.env.example`
+(`BOOKING_DB_PASSWORD`), `gateway/conf.d/default.conf` (new
+`/apps/resource-booking/api/` location), `services/auth-gateway/src/permissions.ts`
+(two new `seedRow()` demo-permission calls), `scripts/test-stack.mjs`, this
+README. One new dependency (`lucide-react`, in `apps/resource-booking`,
+matching the precedent already set by `apps/admin`).
+
+---
+
+**Older handoff, preserved below for now**: built the platform notification system described in
 §16 — a real backend (`notifications` table, four session-gated read
 endpoints, an admin announcement endpoint) and a real frontend
 (`NotificationBell` in `packages/ui`, wired into all five real header

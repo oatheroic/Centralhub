@@ -1029,6 +1029,112 @@ async function main() {
     ok("health body reports ok:true", res.body?.ok === true, JSON.stringify(res.body));
   });
 
+  // -- 10b. Resource booking (native permission gate + real booking flow) --
+  // First real per-app mutating backend in this repo (README §13) — exercises
+  // the native gate end to end: booking-api forwards the session cookie to
+  // auth-gateway's own /session/verify-permission before any write/edit/
+  // delete, rather than trusting the client. dev-user has read+write but not
+  // edit/delete on resource-booking (see permissions.ts's seedDevPermissions).
+  section("10b. Resource booking (§13 native-gate real backend)");
+  const bookingBase = "/apps/resource-booking/api";
+  let testRoomId;
+
+  await must("dev-user cannot manage rooms (no edit permission)", async () => {
+    const res = await getJson(user, `${GATEWAY}${bookingBase}/resources`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: `should-not-be-created-${Date.now()}` }),
+    });
+    ok("dev-user POST /resources -> 403", res.status === 403, `status ${res.status}`);
+  });
+
+  await must("dev-admin creates a room", async () => {
+    const res = await getJson(admin, `${GATEWAY}${bookingBase}/resources`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: `Test Stack Room ${Date.now()}`, location: "Floor 9", capacity: 4 }),
+    });
+    ok("dev-admin POST /resources -> 201", res.status === 201, `status ${res.status}`);
+    testRoomId = res.body?.id;
+    ok("created room id captured", Boolean(testRoomId));
+  });
+
+  const slotStart = new Date(Date.now() + 24 * 60 * 60 * 1000); // tomorrow, well clear of any prior run's leftovers
+  const slotEnd = new Date(slotStart.getTime() + 60 * 60 * 1000);
+  let adminBookingId;
+
+  await must("dev-admin books the room", async () => {
+    const res = await getJson(admin, `${GATEWAY}${bookingBase}/bookings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        resourceId: testRoomId,
+        title: "Planning sync",
+        startsAt: slotStart.toISOString(),
+        endsAt: slotEnd.toISOString(),
+      }),
+    });
+    ok("dev-admin POST /bookings -> 201", res.status === 201, `status ${res.status}`);
+    adminBookingId = res.body?.id;
+  });
+
+  await must("an overlapping booking on the same room is rejected (DB exclusion constraint)", async () => {
+    const overlapStart = new Date(slotStart.getTime() + 30 * 60 * 1000); // starts 30min into the existing booking
+    const overlapEnd = new Date(overlapStart.getTime() + 60 * 60 * 1000);
+    const res = await getJson(admin, `${GATEWAY}${bookingBase}/bookings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        resourceId: testRoomId,
+        title: "Should conflict",
+        startsAt: overlapStart.toISOString(),
+        endsAt: overlapEnd.toISOString(),
+      }),
+    });
+    ok("overlapping POST /bookings -> 409", res.status === 409, `status ${res.status}`);
+  });
+
+  let userBookingId;
+  await must("dev-user (write, no edit) books a non-overlapping slot on the same room", async () => {
+    const laterStart = new Date(slotEnd.getTime() + 60 * 60 * 1000); // an hour after dev-admin's booking ends
+    const laterEnd = new Date(laterStart.getTime() + 60 * 60 * 1000);
+    const res = await getJson(user, `${GATEWAY}${bookingBase}/bookings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        resourceId: testRoomId,
+        title: "dev-user's booking",
+        startsAt: laterStart.toISOString(),
+        endsAt: laterEnd.toISOString(),
+      }),
+    });
+    ok("dev-user POST /bookings -> 201", res.status === 201, `status ${res.status}`);
+    userBookingId = res.body?.id;
+  });
+
+  await must("dev-user cannot cancel dev-admin's booking (lacks delete)", async () => {
+    const res = await getJson(user, `${GATEWAY}${bookingBase}/bookings/${adminBookingId}`, { method: "DELETE" });
+    ok("dev-user DELETE another user's booking -> 403", res.status === 403, `status ${res.status}`);
+  });
+
+  await must("dev-user can always cancel their own booking", async () => {
+    const res = await getJson(user, `${GATEWAY}${bookingBase}/bookings/${userBookingId}`, { method: "DELETE" });
+    ok("dev-user DELETE own booking -> 204", res.status === 204, `status ${res.status}`);
+  });
+
+  await must("cleanup: dev-admin cancels their own booking and deletes the test room", async () => {
+    const delBooking = await getJson(admin, `${GATEWAY}${bookingBase}/bookings/${adminBookingId}`, { method: "DELETE" });
+    ok("cleanup DELETE booking -> 204", delBooking.status === 204, `status ${delBooking.status}`);
+
+    const delRoom = await getJson(admin, `${GATEWAY}${bookingBase}/resources/${testRoomId}`, { method: "DELETE" });
+    ok("cleanup DELETE resource -> 204", delRoom.status === 204, `status ${delRoom.status}`);
+  });
+
+  await must("unauthenticated requests to the booking API are gated the same as any app", async () => {
+    const res = await hop(makeJar(), `${GATEWAY}${bookingBase}/resources`);
+    ok("anonymous GET /resources -> 302 to /auth/login", res.status === 302 && (res.headers.get("location") || "").includes("/auth/login"), `status ${res.status}`);
+  });
+
   // -- 11. Instant revocation (Pillar 4c) — run LAST for dev-user -----------
   section("11. Instant session revocation (§8)");
   await must("force-logging-out dev-user takes effect on their very next request", async () => {

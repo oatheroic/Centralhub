@@ -1,0 +1,6 @@
+{
+  "name": "Resource Booking",
+  "department": "Operations",
+  "icon": "CalendarClock",
+  "description": "Book meeting rooms and see what's already reserved."
+}

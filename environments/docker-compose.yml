@@ -10,6 +10,7 @@ volumes:
   assets_storage: {}
   engineering_pgdata: {}
   engineering_storage: {}
+  booking_pgdata: {}
 
 services:
   gateway:
@@ -29,6 +30,8 @@ services:
       - app-admin
       - app-assets
       - app-engineering
+      - booking-api
+      - app-resource-booking
     networks:
       - centralhub
 
@@ -389,5 +392,48 @@ services:
     build:
       context: ..
       dockerfile: apps/admin/Dockerfile
+    networks:
+      - centralhub
+
+  # --- Resource booking's own database: a sibling to `db`/`assets-db`/
+  # `engineering-db` — every app owns its data. Unlike assets/engineering,
+  # this app is first-party trusted code, so there's no PostgREST/storage-api
+  # layer here — just Postgres behind this app's own small Express API
+  # (booking-api below), using the native permission gate (README §7)
+  # instead of minted-JWT/RLS.
+  booking-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: booking
+      POSTGRES_USER: booking
+      POSTGRES_PASSWORD: ${BOOKING_DB_PASSWORD}
+    volumes:
+      - booking_pgdata:/var/lib/postgresql/data
+    networks:
+      - centralhub
+
+  # --- Resource booking's backend: the first real per-app mutating backend
+  # in this repo (see README §13's "Real mutating backend per app" gap) —
+  # calls auth-gateway's GET /session/verify-permission before any write/
+  # edit/delete, the native-gate pattern documented but previously unused.
+  booking-api:
+    build:
+      context: ..
+      dockerfile: services/booking-api/Dockerfile
+    environment:
+      PORT: 4200
+      DATABASE_URL: postgres://booking:${BOOKING_DB_PASSWORD}@booking-db:5432/booking
+      AUTH_GATEWAY_URL: http://auth-gateway:4100
+    depends_on:
+      - booking-db
+      - auth-gateway
+    networks:
+      - centralhub
+
+  # --- App: resource-booking (frontend) --------------------------------
+  app-resource-booking:
+    build:
+      context: ..
+      dockerfile: apps/resource-booking/Dockerfile
     networks:
       - centralhub
