@@ -10,12 +10,12 @@ WORKDIR /workspace
 RUN corepack enable
 COPY pnpm-workspace.yaml package.json ./
 COPY packages/service-kit ./packages/service-kit
-COPY services/booking-api ./services/booking-api
-RUN pnpm install --filter @services/booking-api... --frozen-lockfile=false
+COPY services/_template ./services/_template
+RUN pnpm install --filter @services/template... --frozen-lockfile=false
 # `...` = this package plus its workspace deps, built in topological order
 # (service-kit first).
-RUN pnpm --filter @services/booking-api... build
-RUN pnpm --filter @services/booking-api deploy --prod /deploy
+RUN pnpm --filter @services/template... build
+RUN pnpm --filter @services/template deploy --prod /deploy
 
 FROM node:20-alpine AS runtime
 WORKDIR /app

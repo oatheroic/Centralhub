@@ -1,6 +1,7 @@
 import { Router } from "express";
+import { hasVerb, type AuthedRequest } from "@centralhub/service-kit";
 import { pool } from "../db.js";
-import { requireVerb, checkVerb, type AuthedRequest } from "../auth.js";
+import { requireVerb, notify } from "../auth.js";
 
 export const bookingsRouter = Router();
 
@@ -98,25 +99,43 @@ bookingsRouter.post("/bookings", requireVerb("write"), async (req: AuthedRequest
 });
 
 // A user can always cancel their own booking. Canceling someone else's
-// (an admin override) requires the "delete" verb.
+// (an admin override) requires the "delete" verb — and tells the owner,
+// since from their side the booking just silently vanished otherwise.
 bookingsRouter.delete("/bookings/:id", async (req: AuthedRequest, res) => {
   const id = Number(req.params.id);
   try {
-    const existing = await pool.query<BookingRow>("SELECT * FROM bookings WHERE id = $1", [id]);
+    const existing = await pool.query<BookingRow & { resource_name: string }>(
+      `SELECT b.*, r.name AS resource_name
+       FROM bookings b JOIN resources r ON r.id = b.resource_id
+       WHERE b.id = $1`,
+      [id],
+    );
     const row = existing.rows[0];
     if (!row) {
       res.sendStatus(404);
       return;
     }
-    if (row.user_sub !== req.identity!.sub) {
-      const status = await checkVerb(req.headers.cookie!, "delete");
-      if (status !== 200) {
-        res.sendStatus(status);
-        return;
-      }
+    const isOverride = row.user_sub !== req.identity!.sub;
+    if (isOverride && !hasVerb(req, "delete")) {
+      res.sendStatus(403);
+      return;
     }
     await pool.query("DELETE FROM bookings WHERE id = $1", [id]);
     res.sendStatus(204);
+    if (isOverride) {
+      // After the response — a notifications hiccup must never fail the
+      // cancellation itself (notify() never throws; see service-kit).
+      const when = new Date(row.starts_at).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
+      void notify({
+        recipientSubs: [row.user_sub],
+        type: "warning",
+        title: "Your booking was cancelled",
+        body: `"${row.title}" in ${row.resource_name} on ${when} was cancelled by ${req.identity!.name}.`,
+        link: "/apps/resource-booking/",
+        actorSub: req.identity!.sub,
+        dedupeKey: `booking-cancelled:${id}`,
+      });
+    }
   } catch (err) {
     console.error("booking-api: cancel booking failed", err);
     res.status(502).json({ error: "unavailable" });

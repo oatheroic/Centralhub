@@ -1,8 +1,10 @@
 import express from "express";
 import cookieParser from "cookie-parser";
+import { applyMigrations, connectWithRetry, healthRouter } from "@centralhub/service-kit";
 import { config } from "./config.js";
-import { migrate } from "./db.js";
-import { resolveIdentity } from "./auth.js";
+import { pool } from "./db.js";
+import { migrations } from "./migrations.js";
+import { authenticate } from "./auth.js";
 import { resourcesRouter } from "./routes/resources.js";
 import { bookingsRouter } from "./routes/bookings.js";
 
@@ -10,20 +12,18 @@ const app = express();
 app.use(cookieParser());
 app.use(express.json());
 
-app.get("/health", (_req, res) => {
-  res.json({ ok: true });
-});
+app.use(healthRouter);
 
-// Every route below needs the caller's identity (for user_sub on bookings,
-// or as a prerequisite to the write/edit/delete permission checks) — read
-// access itself is already enforced ahead of this service by Nginx's
-// auth_request gate on /apps/resource-booking/.
-app.use(resolveIdentity);
+// Every route below needs the caller's identity (for user_sub on bookings)
+// and permission set (for the write/edit/delete checks) — one auth-gateway
+// round-trip per request, see @centralhub/service-kit's createAuth().
+app.use(authenticate);
 app.use(resourcesRouter);
 app.use(bookingsRouter);
 
 async function start() {
-  await migrate();
+  await connectWithRetry(pool, "booking-api");
+  await applyMigrations(pool, migrations, "booking-api");
   app.listen(config.port, () => {
     console.log(`booking-api listening on :${config.port}`);
   });

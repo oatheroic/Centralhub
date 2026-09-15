@@ -32,6 +32,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { "Content-Type": "application/json" },
     ...init,
   });
+  if (res.status === 401) {
+    // The session expired or was revoked mid-use. The API surface answers
+    // with a bare 401 (no HTML login redirect — see the gateway's generic
+    // /apps/<id>/api/ block); a full reload hits the page-level gate, which
+    // does redirect to /auth/login.
+    window.location.reload();
+    throw new ApiError(401, "Your session has ended — reloading to sign in again.");
+  }
   if (!res.ok) {
     const body = (await res.json().catch(() => null)) as { error?: string } | null;
     throw new ApiError(res.status, body?.error ?? `request failed with status ${res.status}`);

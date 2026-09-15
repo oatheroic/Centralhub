@@ -167,14 +167,58 @@ sessionRouter.get("/permissions", async (req, res) => {
   }
 });
 
-// For a FUTURE per-app backend to call before executing a real mutating
-// action — auth-gateway owns the single source of truth for permissions
-// (the app_permissions table), so any app that grows a real write/edit/
-// delete endpoint should check here server-side rather than trusting the
-// client-side useGuardedAction() hook, which is a UX guard only. Shaped
-// like /session/verify(-admin) (forwarded cookie in, bare 200/401/403 out)
-// so a future app's own Nginx location could gate it the same way this
-// gateway's auth_request does today, or a backend could call it directly.
+// The single round-trip a per-app backend makes per request: identity
+// (what /me returns) plus all four permission verbs for one app, in one
+// response. packages/service-kit's `authenticate` middleware calls this
+// once, then requireVerb()/hasVerb() are pure in-memory checks — replacing
+// the original booking-api pattern of /me followed by a separate
+// /session/verify-permission hop per mutation. Fails closed the same way
+// as /me (401 on a bad/revoked session, 503 on a DB error — the kit treats
+// any non-200 as "denied"). /me and /session/verify-permission stay as-is
+// for frontends and for any caller that only needs one of the two halves.
+sessionRouter.get("/session/context", async (req, res) => {
+  const resolved = await resolveSession(req);
+  if (resolved.error) {
+    res.status(resolved.error).json({ error: "not authenticated" });
+    return;
+  }
+  const { claims } = resolved;
+
+  const appId = req.query.app as string | undefined;
+  if (!appId) {
+    res.status(400).json({ error: "missing ?app= query param" });
+    return;
+  }
+  try {
+    const [roles, attrs, permissions] = await Promise.all([
+      getRoles(claims.sub),
+      getUserAttributes(claims.sub),
+      getPermission(claims.sub, appId),
+    ]);
+    res.json({
+      sub: claims.sub,
+      name: claims.name,
+      email: claims.email,
+      roles,
+      department: attrs?.department ?? null,
+      position: attrs?.position ?? null,
+      jobLevel: attrs?.jobLevel ?? null,
+      permissions,
+    });
+  } catch (err) {
+    console.error("auth-gateway: /session/context lookup failed", err);
+    res.status(503).json({ error: "unavailable" });
+  }
+});
+
+// The single-verb predecessor of /session/context above — kept for any
+// caller that only needs a bare 200/401/403 (e.g. a future app's own Nginx
+// auth_request against it). Shaped like /session/verify(-admin): forwarded
+// cookie in, bare status out. auth-gateway owns the single source of truth
+// for permissions (the app_permissions table), so any app with a real
+// write/edit/delete endpoint must check here (or via /session/context)
+// server-side rather than trusting the client-side useGuardedAction()
+// hook, which is a UX guard only.
 sessionRouter.get("/session/verify-permission", async (req, res) => {
   const resolved = await resolveSession(req);
   if (resolved.error) {

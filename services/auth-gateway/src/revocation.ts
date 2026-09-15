@@ -15,7 +15,17 @@ export async function isRevoked(userSub: string, issuedAt: Date): Promise<boolea
   );
   const row = result.rows[0];
   if (!row) return false;
-  return issuedAt < new Date(row.revoked_before);
+  // Compare at whole-second granularity: a JWT's `iat` is floored to the
+  // second, while `revoked_before` is a microsecond `now()`. Without the
+  // truncation, a session legitimately issued a few hundred ms AFTER the
+  // revocation — in the same wall-clock second — has an `iat` that still
+  // sorts before it, and the user's fresh re-login is rejected as revoked
+  // (found live: scripts/test-stack.mjs's revoke-then-relogin got fast
+  // enough to hit this). The cost is a sub-second window in which a
+  // session issued just BEFORE the revocation survives — unavoidable with
+  // second-granular `iat`, and irrelevant to the actual use case.
+  const revokedBeforeSec = Math.floor(new Date(row.revoked_before).getTime() / 1000);
+  return Math.floor(issuedAt.getTime() / 1000) < revokedBeforeSec;
 }
 
 export async function revokeUser(userSub: string): Promise<void> {

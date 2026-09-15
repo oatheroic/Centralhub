@@ -394,6 +394,28 @@ async function main() {
     ok("anonymous GET /auth/permissions -> 401", status === 401, `status ${status}`);
   });
 
+  // /session/context is what @centralhub/service-kit's `authenticate` calls
+  // once per backend request — identity + all four verbs in one response.
+  await must("/session/context returns identity and all four verbs in one round-trip", async () => {
+    const ctx = await getJson(user, `${GATEWAY}/auth/session/context?app=marketing`);
+    ok("dev-user context -> 200", ctx.status === 200, `status ${ctx.status}`);
+    ok("context carries sub/name/email/roles", typeof ctx.body?.sub === "string" && typeof ctx.body?.name === "string" && Array.isArray(ctx.body?.roles), JSON.stringify(ctx.body));
+    ok(
+      "context.permissions for marketing matches /auth/permissions (read+write only)",
+      ctx.body?.permissions?.read === true && ctx.body?.permissions?.write === true && ctx.body?.permissions?.edit === false && ctx.body?.permissions?.delete === false,
+      JSON.stringify(ctx.body?.permissions),
+    );
+
+    const finance = await getJson(user, `${GATEWAY}/auth/session/context?app=finance`);
+    ok("dev-user finance context: all four verbs false", finance.status === 200 && !finance.body?.permissions?.read && !finance.body?.permissions?.write && !finance.body?.permissions?.edit && !finance.body?.permissions?.delete, JSON.stringify(finance.body?.permissions));
+
+    const missingApp = await getJson(user, `${GATEWAY}/auth/session/context`);
+    ok("missing ?app= -> 400", missingApp.status === 400, `status ${missingApp.status}`);
+
+    const anon = await getJson(makeJar(), `${GATEWAY}/auth/session/context?app=marketing`);
+    ok("anonymous GET /auth/session/context -> 401", anon.status === 401, `status ${anon.status}`);
+  });
+
   // -- 6. Admin panel APIs (§7/§9) -------------------------------------------
   section("6. Admin-only management APIs");
   await must("dev-admin can list users and the permission matrix", async () => {
@@ -546,8 +568,28 @@ async function main() {
   // fresh table.
   section("6d. Notifications — read-API isolation and producer wiring");
 
-  function countByTitle(list, needle) {
-    return (list || []).filter((n) => n.title?.includes(needle)).length;
+  // Delta helpers keyed on notification id, not on how many matching titles
+  // sit in the list: the list endpoint is capped at the 50 most recent rows
+  // and this suite is rerun against a persistent stack, so once enough
+  // "Finance"/"Assets" grants have accumulated a new one simply pushes an
+  // old one out of the window and a title-count delta reads as 0.
+  function maxId(list) {
+    return (list || []).reduce((m, n) => Math.max(m, Number(n.id) || 0), 0);
+  }
+  function countNewByTitle(list, needle, sinceId) {
+    return (list || []).filter((n) => Number(n.id) > sinceId && n.title?.includes(needle)).length;
+  }
+  // Producers are fire-and-forget (`void createNotification(...)` right
+  // before the 204 -- see routes/adminPermissions.ts), so the row can land a
+  // few ms after the response. Poll briefly rather than read once.
+  async function listUntil(jar, predicate, attempts = 10) {
+    let last;
+    for (let i = 0; i < attempts; i++) {
+      last = await getJson(jar, `${GATEWAY}/auth/notifications`);
+      if (predicate(last.body)) return last;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    return last;
   }
 
   await must("read APIs require a session and isolate by recipient", async () => {
@@ -574,15 +616,15 @@ async function main() {
     // true here from a previous run against this same stack.
     await setFinanceRead(false);
     const before = await getJson(user, `${GATEWAY}/auth/notifications`);
-    const beforeCount = countByTitle(before.body, "Finance");
+    const sinceId = maxId(before.body);
 
     const grant = await setFinanceRead(true);
     ok("grant read:true -> 204", grant.status === 204, `status ${grant.status}`);
-    const afterGrant = await getJson(user, `${GATEWAY}/auth/notifications`);
+    const afterGrant = await listUntil(user, (b) => countNewByTitle(b, "Finance", sinceId) >= 1);
     ok(
       "exactly one new Finance-access notification appeared",
-      countByTitle(afterGrant.body, "Finance") === beforeCount + 1,
-      `before ${beforeCount}, after ${countByTitle(afterGrant.body, "Finance")}`,
+      countNewByTitle(afterGrant.body, "Finance", sinceId) === 1,
+      `new since id ${sinceId}: ${countNewByTitle(afterGrant.body, "Finance", sinceId)}`,
     );
     ok(
       "it links to /apps/finance/",
@@ -596,8 +638,8 @@ async function main() {
     const afterRegrant = await getJson(user, `${GATEWAY}/auth/notifications`);
     ok(
       "re-granting an already-granted read does not duplicate the notification",
-      countByTitle(afterRegrant.body, "Finance") === beforeCount + 1,
-      `count ${countByTitle(afterRegrant.body, "Finance")}`,
+      countNewByTitle(afterRegrant.body, "Finance", sinceId) === 1,
+      `new since id ${sinceId}: ${countNewByTitle(afterRegrant.body, "Finance", sinceId)}`,
     );
 
     // Restore the deny-all baseline section 4/5 (and a future run of this
@@ -625,23 +667,23 @@ async function main() {
 
     await setAssetsReadBulk(false);
     const before = await getJson(user, `${GATEWAY}/auth/notifications`);
-    const beforeCount = countByTitle(before.body, "Assets");
+    const sinceId = maxId(before.body);
 
     const bulk = await setAssetsReadBulk(true);
     ok("bulk grant read:true -> 204", bulk.status === 204, `status ${bulk.status}`);
-    const afterGrant = await getJson(user, `${GATEWAY}/auth/notifications`);
+    const afterGrant = await listUntil(user, (b) => countNewByTitle(b, "Assets", sinceId) >= 1);
     ok(
       "exactly one new Assets-access notification appeared",
-      countByTitle(afterGrant.body, "Assets") === beforeCount + 1,
-      `before ${beforeCount}, after ${countByTitle(afterGrant.body, "Assets")}`,
+      countNewByTitle(afterGrant.body, "Assets", sinceId) === 1,
+      `new since id ${sinceId}: ${countNewByTitle(afterGrant.body, "Assets", sinceId)}`,
     );
 
     await setAssetsReadBulk(true);
     const afterRegrant = await getJson(user, `${GATEWAY}/auth/notifications`);
     ok(
       "bulk-regranting an already-granted read does not duplicate",
-      countByTitle(afterRegrant.body, "Assets") === beforeCount + 1,
-      `count ${countByTitle(afterRegrant.body, "Assets")}`,
+      countNewByTitle(afterRegrant.body, "Assets", sinceId) === 1,
+      `new since id ${sinceId}: ${countNewByTitle(afterRegrant.body, "Assets", sinceId)}`,
     );
 
     await setAssetsReadBulk(originalRead);
@@ -1031,10 +1073,13 @@ async function main() {
 
   // -- 10b. Resource booking (native permission gate + real booking flow) --
   // First real per-app mutating backend in this repo (README §13) — exercises
-  // the native gate end to end: booking-api forwards the session cookie to
-  // auth-gateway's own /session/verify-permission before any write/edit/
-  // delete, rather than trusting the client. dev-user has read+write but not
-  // edit/delete on resource-booking (see permissions.ts's seedDevPermissions).
+  // the native gate end to end: api-resource-booking (via
+  // @centralhub/service-kit's `authenticate`) forwards the session cookie to
+  // auth-gateway's /session/context once per request and enforces write/
+  // edit/delete from that, rather than trusting the client. Also covers the
+  // gateway's generic /apps/<id>/api/ routing and the first app-originated
+  // notification producer. dev-user has read+write but not edit/delete on
+  // resource-booking (see permissions.ts's seedDevPermissions).
   section("10b. Resource booking (§13 native-gate real backend)");
   const bookingBase = "/apps/resource-booking/api";
   let testRoomId;
@@ -1117,8 +1162,36 @@ async function main() {
     ok("dev-user DELETE another user's booking -> 403", res.status === 403, `status ${res.status}`);
   });
 
+  // Admin-override cancellation is an app-originated notification producer
+  // (README §16): booking-api calls service-kit's notify() -> auth-gateway's
+  // /internal/notifications, and the owner sees it in their bell. Delta-
+  // based like §6d, since rows accumulate across reruns of this suite.
+  await must("admin-override cancel notifies the booking's owner (app-originated notification)", async () => {
+    const before = await getJson(user, `${GATEWAY}/auth/notifications/count`);
+    const res = await getJson(admin, `${GATEWAY}${bookingBase}/bookings/${userBookingId}`, { method: "DELETE" });
+    ok("dev-admin DELETE dev-user's booking -> 204", res.status === 204, `status ${res.status}`);
+    // notify() fires after the 204 is sent; give the server-to-server hop
+    // a moment before asserting on the delta.
+    await new Promise((r) => setTimeout(r, 500));
+    const after = await getJson(user, `${GATEWAY}/auth/notifications/count`);
+    ok("dev-user unread count +1 after admin cancelled their booking", after.body?.unread === before.body?.unread + 1, `before ${before.body?.unread}, after ${after.body?.unread}`);
+    const list = await getJson(user, `${GATEWAY}/auth/notifications?limit=5`);
+    const latest = Array.isArray(list.body) ? list.body[0] : null;
+    ok("latest notification is from resource-booking with a warning tone", latest?.sourceAppId === "resource-booking" && latest?.type === "warning", JSON.stringify(latest));
+  });
+
+  // dev-user's booking was cancelled by the override above, so the "own
+  // booking" path gets its own fresh row.
   await must("dev-user can always cancel their own booking", async () => {
-    const res = await getJson(user, `${GATEWAY}${bookingBase}/bookings/${userBookingId}`, { method: "DELETE" });
+    const ownStart = new Date(slotEnd.getTime() + 3 * 60 * 60 * 1000);
+    const ownEnd = new Date(ownStart.getTime() + 60 * 60 * 1000);
+    const created = await getJson(user, `${GATEWAY}${bookingBase}/bookings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ resourceId: testRoomId, title: "dev-user's second booking", startsAt: ownStart.toISOString(), endsAt: ownEnd.toISOString() }),
+    });
+    ok("dev-user POST /bookings (second) -> 201", created.status === 201, `status ${created.status}`);
+    const res = await getJson(user, `${GATEWAY}${bookingBase}/bookings/${created.body?.id}`, { method: "DELETE" });
     ok("dev-user DELETE own booking -> 204", res.status === 204, `status ${res.status}`);
   });
 
@@ -1130,9 +1203,22 @@ async function main() {
     ok("cleanup DELETE resource -> 204", delRoom.status === 204, `status ${delRoom.status}`);
   });
 
-  await must("unauthenticated requests to the booking API are gated the same as any app", async () => {
+  // The generic /apps/<id>/api/ location is an API surface: bare status
+  // codes, no HTML login redirect (which fetch() would follow into an
+  // unparseable 200) — same policy as /api/inference/.
+  await must("unauthenticated requests to an app API get a bare 401, not a login redirect", async () => {
     const res = await hop(makeJar(), `${GATEWAY}${bookingBase}/resources`);
-    ok("anonymous GET /resources -> 302 to /auth/login", res.status === 302 && (res.headers.get("location") || "").includes("/auth/login"), `status ${res.status}`);
+    ok("anonymous GET /resources -> 401", res.status === 401, `status ${res.status}`);
+  });
+
+  await must("generic /apps/<id>/api/ block applies the per-app read gate as a bare status", async () => {
+    // dev-user has no finance permission row (deny-all). Through the generic
+    // frontend block that denial renders as the HTML @permission_denied page
+    // with HTTP 200 (see §4's Nginx gotcha); through the API block it must
+    // be a bare 403 — proving the request matched the API location, not the
+    // frontend one, without needing an api-finance container to exist.
+    const res = await hop(user, `${GATEWAY}/apps/finance/api/anything`);
+    ok("dev-user GET /apps/finance/api/anything -> bare 403 (API block, not HTML denial page)", res.status === 403, `status ${res.status}`);
   });
 
   // -- 11. Instant revocation (Pillar 4c) — run LAST for dev-user -----------

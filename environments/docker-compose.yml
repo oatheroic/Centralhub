@@ -30,7 +30,7 @@ services:
       - app-admin
       - app-assets
       - app-engineering
-      - booking-api
+      - api-resource-booking
       - app-resource-booking
     networks:
       - centralhub
@@ -399,8 +399,8 @@ services:
   # `engineering-db` — every app owns its data. Unlike assets/engineering,
   # this app is first-party trusted code, so there's no PostgREST/storage-api
   # layer here — just Postgres behind this app's own small Express API
-  # (booking-api below), using the native permission gate (README §7)
-  # instead of minted-JWT/RLS.
+  # (api-resource-booking below), using the native permission gate
+  # (README §7) instead of minted-JWT/RLS.
   booking-db:
     image: postgres:16-alpine
     environment:
@@ -413,10 +413,13 @@ services:
       - centralhub
 
   # --- Resource booking's backend: the first real per-app mutating backend
-  # in this repo (see README §13's "Real mutating backend per app" gap) —
-  # calls auth-gateway's GET /session/verify-permission before any write/
-  # edit/delete, the native-gate pattern documented but previously unused.
-  booking-api:
+  # in this repo, and the reference consumer of @centralhub/service-kit.
+  # To add a backend for another app: copy this block (and a <id>-db block
+  # above). The service name MUST be api-<id> and it MUST listen on 4200 —
+  # the gateway's generic /apps/<id>/api/ location resolves api-<id>:4200
+  # by convention, so no Nginx edit is needed. Add it to gateway's
+  # depends_on at the top. See services/_template for the code side.
+  api-resource-booking:
     build:
       context: ..
       dockerfile: services/booking-api/Dockerfile

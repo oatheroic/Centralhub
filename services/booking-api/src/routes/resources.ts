@@ -1,6 +1,7 @@
 import { Router } from "express";
+import type { AuthedRequest } from "@centralhub/service-kit";
 import { pool } from "../db.js";
-import { requireVerb, type AuthedRequest } from "../auth.js";
+import { requireVerb } from "../auth.js";
 
 export const resourcesRouter = Router();
 

@@ -19,7 +19,7 @@ small, mechanical, well-documented change — never a rearchitecture.
 | 3 | Real authentication (Keycloak + auth-gateway) + admin gate | Done |
 | 4 | Granular per-app RBAC (read/write/edit/delete) | Done (foundational) |
 | 5 | Instant session/role revocation | Done |
-| — | Real per-app backends, production hardening | Started — `apps/resource-booking` (§10e) is the first app with a real backend; production hardening not started (see §13) |
+| — | Real per-app backends, production hardening | Backend factory done (§10f: `services/_template` + `@centralhub/service-kit`, zero-edit `/apps/<id>/api/` routing) with `apps/resource-booking` (§10e) as the reference; production hardening not started (see §13) |
 
 ---
 
@@ -54,18 +54,23 @@ CentralHub/
 │                                  # instead of minted-JWT/RLS, since it's trusted
 │                                  # first-party code, not a third-party export
 ├── packages/
-│   └── ui/                    # Shared design tokens, Tailwind preset, and React
-│                                # primitives (§9) — consumed via workspace:*
+│   ├── ui/                    # Shared design tokens, Tailwind preset, and React
+│   │                            # primitives (§9) — consumed via workspace:*
+│   └── service-kit/           # Shared Node library for first-party app backends (§10f):
+│                                # one-call auth middleware (authenticate/requireVerb/
+│                                # hasVerb), Pool + retry + tracked migrations, notify(),
+│                                # health route. Built to dist/ (Node runtime, unlike ui).
 ├── services/
+│   ├── _template/             # Copy this to scaffold a new app backend (§10f) — uses
+│   │                           # service-kit; header comment carries the checklist
 │   ├── inference-gateway/     # Single internal API all apps call for LLM access.
 │   │                           # Proxies to Claude today, swaps to a local model later.
 │   ├── auth-gateway/          # OIDC relying party for Keycloak; issues chub_session;
 │   │                           # target of Nginx's auth_request gate; also owns the
 │   │                           # app_permissions table (per-app read/write/edit/delete).
 │   └── booking-api/           # apps/resource-booking's own backend (§10e) — Express +
-│                                # its own Postgres, forwards the caller's session cookie
-│                                # to auth-gateway's /session/verify-permission before
-│                                # any write/edit/delete (the native gate, §7).
+│                                # its own Postgres; the reference consumer of
+│                                # service-kit (§10f). Compose service: api-resource-booking.
 ├── keycloak/
 │   ├── realm-export.json      # Pre-provisioned realm/roles/client/seed users
 │   └── themes/centralhub/     # Custom login theme (CSS-only override)
@@ -113,7 +118,14 @@ CentralHub/
      a row afterward.
   5. Copy in `usePermissions.ts` if it needs RBAC (§7) — no separate
      `KNOWN_APPS` edit anymore, that's covered by step 4's manifest.
-  - **No Nginx changes needed** for any of the above — see Pillar 2.
+  6. **If it needs a real backend** (mutations, its own data): copy
+     `services/_template` to `services/<name>` and follow the checklist in
+     its `src/index.ts` header — set `APP_ID`, add a `<name>-db` and an
+     `api-<name>` compose service (the name and port 4200 are the routing
+     convention), add `<NAME>_DB_PASSWORD` to `.env.example`. See §10f.
+  - **No Nginx changes needed** for any of the above — see Pillar 2. That
+    now includes backends: `/apps/<name>/api/*` routes to `api-<name>:4200`
+    by convention.
 
 ---
 
@@ -124,6 +136,16 @@ CentralHub/
   Root (`/`) proxies to `apps/central-hub`. Every other app is routed by one
   dynamic regex location — `/apps/<name>/<rest>` → `app-<name>:80/<rest>` — so
   a new app only needs a matching `app-<name>` compose service to exist.
+  Since §10f the same is true for backends: a second regex location,
+  `/apps/<name>/api/<rest>` → `api-<name>:4200/<rest>`, sits between the
+  admin block and the frontend block, so a first-party API is reachable
+  with zero Nginx edits as long as its compose service follows the
+  `api-<name>` / port-4200 convention. API paths answer with bare
+  401/403 (no HTML login redirect, which `fetch()` would follow into an
+  unparseable 200) and a bare 502 when no such container exists — the same
+  policy as `/api/inference/`. The third-party data-API blocks
+  (`assets`/`engineering`, §10) keep their own `^~` blocks: they proxy to
+  PostgREST/storage-api with different sub-paths and bearer forwarding.
   `/api/inference/` is routed separately. Apps are static assets served by a
   tiny per-app Nginx image, keeping routing decoupled from app internals.
 - **Status**: done, stable since Phase 1; extended in Phase 4 with the
@@ -356,14 +378,17 @@ containment; RLS wins on app-layer defense, granularity, and hot-path scaling.
 4. **Otherwise** (first-party code, app-level 4-flag gating, want instant
    revocation): → **native gate**.
 
-**Implementing the native gate** for a new first-party backend: the endpoint
-already exists and is the single source of truth (read-only against
-`app_permissions`, no auth-gateway change needed). Forward the `chub_session`
-cookie to `GET /session/verify-permission?app=<id>&verb=<read|write|edit|delete>`
-before the mutation and treat non-`200` as denied — either via an `auth_request`
-in the app's own Nginx location (mirror `/session/verify`) or a direct
-server-to-server call over the Docker network. **Never** trust the client-side
-`useGuardedAction()` hook as the gate; it is a UX affordance only.
+**Implementing the native gate** for a new first-party backend: use
+`@centralhub/service-kit`'s `createAuth({ appId })` (§10f) — its
+`authenticate` middleware forwards the `chub_session` cookie to
+`GET /session/context?app=<id>` once per request (identity + all four
+verbs in one response), and `requireVerb(verb)` / `hasVerb(req, verb)`
+are then pure in-memory checks. Any non-200 from auth-gateway fails closed
+(401 for a missing/revoked session, 502 for an unreachable gateway, 403 for
+`read:false`). The single-verb `GET /session/verify-permission?app=<id>&verb=<verb>`
+(bare 200/401/403) is kept for any caller that only needs that shape — e.g.
+an `auth_request` in an app's own Nginx location. **Never** trust the
+client-side `useGuardedAction()` hook as the gate; it is a UX affordance only.
 
 **Implementing minted-JWT/RLS** for another self-hosted app: follow §10 — give
 the app its own Postgres, put a JWT-verifying layer (PostgREST or equivalent) in
@@ -1530,16 +1555,17 @@ whoever does the next update.
   enforcement *below* untrusted app code), app-level granularity is enough
   (no per-record rules needed), and instant revocation matters more than a
   15-minute-stale token would allow. So `booking-api` forwards the caller's
-  `chub_session` cookie directly to auth-gateway's existing
-  `/session/verify-permission?app=resource-booking&verb=<write|edit|delete>`
-  before any mutation — no new auth-gateway endpoint, no shared JWT secret,
-  no PostgREST/storage-api layer.
+  `chub_session` cookie to auth-gateway before any mutation — no shared
+  JWT secret, no PostgREST/storage-api layer. (Originally via `/me` +
+  `/session/verify-permission` per mutation; since §10f via
+  `@centralhub/service-kit`'s single `/session/context` call per request.)
 - **Architecture**:
   - `booking-db` — a dedicated Postgres, sibling to `db`/`assets-db`/
     `engineering-db` (per-app-owns-its-data), but with no PostgREST in front
-    of it — `booking-api` (a plain Express service, modeled on
-    `services/auth-gateway`'s structure: same `Pool` + `connectionTimeoutMillis`
-    + `connectWithRetry` + idempotent `migrate()` pattern) talks to it
+    of it — `booking-api` (a plain Express service; its Pool/retry/
+    migration plumbing now comes from `@centralhub/service-kit`, §10f, and
+    its schema lives in `src/migrations.ts` as tracked, append-only
+    migrations — `0001_init` is the original SQL verbatim) talks to it
     directly.
   - `resources` (rooms) and `bookings` tables. Double-booking is prevented
     at the database layer, not just in application code — a Postgres
@@ -1548,23 +1574,33 @@ whoever does the next update.
     extension) makes two overlapping bookings for the same room mutually
     exclusive even under a concurrent-request race; `booking-api` catches
     the resulting `23P01 exclusion_violation` and translates it to a `409`.
-  - `services/booking-api/src/auth.ts`: `resolveIdentity` resolves the
-    caller's `sub`/`name` by forwarding their cookie to auth-gateway's
-    existing `GET /me` (needed for `user_sub` on new bookings and for
-    filtering "my bookings"); `requireVerb(verb)` / `checkVerb(cookie, verb)`
-    call `/session/verify-permission`. Read access itself is already
-    enforced ahead of this service by Nginx's `auth_request` gate on
-    `/apps/resource-booking/` — this service only ever re-checks
-    write/edit/delete.
+  - `services/booking-api/src/auth.ts`: two lines — `createAuth()` and
+    `createNotifier()` from the kit. `authenticate` (mounted after
+    `/health`) resolves identity + permissions once per request; routes use
+    `requireVerb("write"|"edit"|"delete")` or `hasVerb(req, "delete")`.
+    Read access itself is already enforced ahead of this service by
+    Nginx's `auth_request` gate on `/apps/resource-booking/api/`; the kit's
+    `read:false → 403` is defense in depth only.
   - A user can always cancel **their own** booking regardless of the
     `delete` verb (`DELETE /bookings/:id` compares `user_sub` first);
     canceling someone else's booking (an admin override) still requires
-    `delete`.
-  - `gateway/conf.d/default.conf`: `location ^~ /apps/resource-booking/api/`
-    — same `^~`-prefix-wins-over-regex shape as the `assets`/`engineering`
-    data-API blocks (§10), proxying to `booking-api` instead of a
-    PostgREST/storage-api pair, and with no bearer-token forwarding since
-    this service trusts the forwarded session cookie, not a minted JWT.
+    `delete` — and, since §10f, **notifies the owner** ("Your booking was
+    cancelled … by <admin>", warning tone, linking back to the app) via the
+    kit's `notify()` → `POST /internal/notifications`: the first
+    app-originated notification producer (§16). Fired after the 204 and
+    fire-and-forget, so a notifications hiccup never fails the cancel.
+    The day-view chips carry a small × for any booking the viewer can act
+    on (their own, or anyone's with `delete`) — found during live testing
+    of §10f that the override path had never had a UI, only "Your upcoming
+    bookings" (own rows) ever showed a Cancel button.
+  - `gateway/conf.d/default.conf`: **no per-app block anymore** — the
+    original `^~ /apps/resource-booking/api/` location was replaced by the
+    generic `/apps/<name>/api/` → `api-<name>:4200` routing (§4, §10f);
+    the compose service is named `api-resource-booking` accordingly.
+  - Frontend `lib/api.ts`: a bare 401 from the API (session expired or
+    revoked mid-use — previously impossible to observe, since the old
+    block redirected to the HTML login page) triggers a full reload so the
+    page-level gate redirects to `/auth/login`.
   - Registered the same way every app is (§3 step 4): `app.manifest.json`
     only, picked up by the existing manifest-sync mechanism (§12b) — no
     `KNOWN_APPS`-style edit anywhere. `services/auth-gateway/src/permissions.ts`'s
@@ -1615,6 +1651,113 @@ whoever does the next update.
 
 ---
 
+## 10f. Backend app factory (`packages/service-kit`, `services/_template`, generic API routing)
+
+- **Objective**: §10e proved the native-gate model with a real backend, but
+  building it also showed that only the *frontend* half of the app factory
+  was templated — `booking-api` was hand-built, and every future backend
+  would re-copy the same identity/verb middleware, Pool/retry/migrate
+  boilerplate and config, hand-write an Nginx `^~ /apps/<id>/api/` block,
+  and have no way to emit notifications. This pass closed those seams
+  **before** the next apps, so "add an app with a backend" is now: copy
+  `services/_template`, add two compose services, done.
+- **`GET /session/context?app=<id>`** (auth-gateway, `routes/session.ts`):
+  identity (`sub`/`name`/`email`/`roles`/`department`/`position`/
+  `jobLevel`) plus `permissions: { read, write, edit, delete }` for one app
+  in a single response — what `/me` and `/session/verify-permission`
+  previously needed two hops (and up to two per mutation) to answer. 401
+  on a missing/revoked session, 400 without `?app=`, 503 on a DB error;
+  the kit treats any non-200 as denied. `/me` and
+  `/session/verify-permission` are unchanged.
+- **`packages/service-kit`** (`@centralhub/service-kit`): the first
+  workspace package built to `dist/` (Node runtime, so unlike
+  `packages/ui`'s source-exported `./src/index.ts` it needs `tsc -b` and
+  `"main": "./dist/index.js"`); `express`/`pg` are peer dependencies —
+  the service owns the versions.
+  - `loadServiceConfig()` — `PORT` (default 4200) / `DATABASE_URL` /
+    `AUTH_GATEWAY_URL`, the three env vars every backend's compose block sets.
+  - `createPool()`, `connectWithRetry()` (lifted from booking-api), and
+    `applyMigrations(pool, migrations, name)` — **tracked migrations**:
+    a `schema_migrations(id, applied_at)` table, each `{ id, sql }` entry
+    runs exactly once per database inside its own transaction and is
+    recorded; the list is append-only. Adopting it on a database created by
+    the old unversioned boot-time `CREATE TABLE IF NOT EXISTS` is safe when
+    that SQL is carried over verbatim as `0001_init` (re-runs as a no-op,
+    then gets recorded — verified live on the existing `booking_pgdata`
+    volume, and on every restart since).
+  - `createAuth({ appId, authGatewayUrl })` → `authenticate` middleware
+    (one `/session/context` call, attaches `req.identity` +
+    `req.permissions`; fails closed: 401 no/revoked session, 502 gateway
+    unreachable or erroring, 403 `read:false`) and `requireVerb(verb)`;
+    plus a standalone `hasVerb(req, verb)` for conditional checks inside a
+    handler (own-vs-override delete). No HTTP after `authenticate`.
+  - `createNotifier({ appId, authGatewayUrl })` → `notify({ recipientSubs,
+    title, body?, link?, type?, actorSub?, dedupeKey? })`, posting the
+    snake_case body `POST /internal/notifications` expects. **Never throws,
+    never rejects** — a notification is a side effect of a mutation that
+    already happened, so an outage is logged, not surfaced as a failed
+    request. This is the trusted-first-party-backend producer path §13/§16
+    described as "designed, not built"; the trigger/outbox pattern remains
+    the design for *third-party* RLS apps, which can't be trusted to call
+    this directly.
+  - `healthRouter` — `GET /health`, mounted before `authenticate`.
+  - **First unit tests in the repo**: `packages/service-kit/src/*.test.ts`
+    (vitest, mocked `fetch`/pool; 16 tests) — `pnpm test:unit`. Covers the
+    authenticate status mapping, requireVerb/hasVerb, notify's never-throw
+    contract, and applyMigrations' skip/transaction/rollback logic.
+- **`services/_template`**: mirrors `apps/_template` — `package.json`,
+  `tsconfig`, `Dockerfile`, and a `src/` wired exactly as booking-api is
+  (`config.ts` with `APP_ID`, `db.ts`, `auth.ts`, `migrations.ts`,
+  `index.ts`, and an example `routes/notes.ts` showing the three
+  permission shapes: read-only, fixed `requireVerb`, conditional `hasVerb`
+  + `notify()`). The copy checklist lives in `src/index.ts`'s header. Not
+  in compose (same as `apps/_template`).
+- **Docker build for kit consumers** (the non-obvious part): the older
+  service Dockerfiles copy `package.json` into the runtime stage and
+  `npm install --omit=dev` — npm can't resolve `workspace:*`. Kit consumers
+  (`booking-api`, `_template`) instead build with
+  `pnpm --filter <pkg>... build` (topological — kit first) and
+  `pnpm --filter <pkg> deploy --prod /deploy`, which copies the kit's
+  `dist` (per its `files`) into a self-contained `node_modules`; the
+  runtime stage copies `/deploy`. Verified the deployed image really
+  contains `node_modules/@centralhub/service-kit/dist`.
+- **Generic backend routing** (`gateway/conf.d/default.conf`, see §4):
+  `location ~ ^/apps/([^/]+)/api/(.*)$` → `api-$1:4200/$2`. Convention:
+  container `api-<id>`, port 4200 (fixed, like `app-<id>:80`). Placed
+  after the `/apps/admin/` block (so `/apps/admin/api/…` stays admin-gated)
+  and before the generic frontend regex (first regex match wins). Bare
+  401/403/502 — an API surface, not browser navigation. The per-app
+  `^~ /apps/resource-booking/api/` block was deleted and compose's
+  `booking-api` renamed `api-resource-booking`.
+- **Latent platform bug found by the tests, fixed** (`services/auth-gateway/src/revocation.ts`):
+  a JWT's `iat` is floored to the second, but `revoked_before` is stored as
+  a microsecond `now()` — a session legitimately issued a few hundred ms
+  *after* a revocation, in the same wall-clock second, had an `iat` that
+  still sorted before it and the user's fresh re-login was rejected as
+  revoked. Present since Phase 5; only surfaced now because
+  `test-stack.mjs`'s revoke-then-relogin got fast enough to land inside
+  one second. Now compared at whole-second granularity (the cost is a
+  sub-second window in which a session issued just *before* the
+  revocation survives — unavoidable with second-granular `iat`).
+- **Test-suite hardening** (`scripts/test-stack.mjs` §6d): the Finance/
+  Assets grant assertions counted matching titles inside the 50-row list
+  cap, which saturates after enough reruns against the persistent stack
+  (a new row pushes an old one out and the delta reads 0), and read once
+  immediately after a fire-and-forget producer. Now id-based deltas
+  (`maxId`/`countNewByTitle`, with `Number()` — `BIGSERIAL` ids come back
+  as strings) with a short poll (`listUntil`).
+- **Status**: done — 148/148 in `test-stack.mjs` (11 new assertions:
+  `/session/context` shape/401/verbs, bare 401 on API paths, the generic
+  API block applying the read gate as a bare 403, admin-override cancel →
+  owner unread +1 with the right source app/type), run twice consecutively;
+  16/16 unit tests; live-verified in a browser (admin cancels dev-user's
+  booking via the new chip ×, dev-user's bell shows it). Deliberately
+  **not** done: auth-gateway itself doesn't adopt the kit (it's the
+  platform, not an app backend); assets/engineering untouched (third-party
+  RLS model); no dev-mode volume mounts for the config-baking gotcha (§10e).
+
+---
+
 ## 11. Apps in this repo
 
 | App | Package | URL | Purpose |
@@ -1626,7 +1769,7 @@ whoever does the next update.
 | `apps/admin` | `@apps/admin` | `/apps/admin/` | Keycloak user list (with a per-user "Revoke session" action, §8, now confirm-gated, §9) + permissions matrix editor (§7). Linked from `central-hub`'s landing grid only for users holding the `admin` role (§9) — that's a discoverability nicety, not the real protection: the `admin`-role Nginx gate is what actually stops access. |
 | `apps/assets` | `@apps/assets` | `/apps/assets/` | First third-party/self-hosted app (§10) — asset purchase requests, registration, transfers; its own Postgres/PostgREST/storage-api, no external SaaS dependency. |
 | `apps/engineering` | `@apps/engineering` | `/apps/engineering/` | Second third-party/self-hosted app (§10b) — machine repair job workflow (report/assign/repair/review); its own Postgres/PostgREST/storage-api, no external SaaS dependency. |
-| `apps/resource-booking` | `@apps/resource-booking` | `/apps/resource-booking/` | First-party app (§10e) — room booking; the first app in this repo with a real mutating backend (`services/booking-api`), using the native permission gate (§7) instead of minted-JWT/RLS. |
+| `apps/resource-booking` | `@apps/resource-booking` | `/apps/resource-booking/` | First-party app (§10e) — room booking; the first app in this repo with a real mutating backend (`services/booking-api`, compose `api-resource-booking`), using the native permission gate (§7) via `@centralhub/service-kit` (§10f) instead of minted-JWT/RLS. Admin-override cancels notify the owner. |
 
 This table itself is still maintained by hand (it's prose, not the registry) —
 but the dashboard entry, permission-matrix participation, and admin role-code
@@ -1693,12 +1836,13 @@ live from auth-gateway's `apps` table; see §12b.
   row (never on a later sync), so an admin who later clears it via the
   Apps tab stays cleared rather than having it silently resurrected.
 - **Explicitly still manual, by design, not an oversight**:
-  `environments/docker-compose.yml`'s per-app service block and
+  `environments/docker-compose.yml`'s per-app service block(s) and
   `gateway/conf.d/default.conf`'s app-specific blocks (the `admin` role
   gate, `assets`/`engineering`'s data-API proxy paths) — containers must
   exist before the stack starts, and Nginx's plain static-frontend routing
-  was already zero-edit per app (see Pillar 2); nothing here changes that
-  boundary. Registering an app's metadata and actually deploying it remain
+  was already zero-edit per app (see Pillar 2); since §10f first-party
+  backend routing (`/apps/<id>/api/` → `api-<id>:4200`) is zero-edit too.
+  Nothing here changes that boundary. Registering an app's metadata and actually deploying it remain
   two separate, independently-orderable steps.
 - **Found via live testing, all fixed**:
   - The reachability check first shipped using a `HEAD` request and
@@ -1779,15 +1923,17 @@ specific to `apps/engineering` (§10b), then everything else.
 | Item | Where it would live | Why deferred |
 |---|---|---|
 | MFA / password reset / self-registration | Keycloak realm config | Out of scope for a local dev foundational slice |
-| Real mutating backend per app | each `apps/<name>` | Done for `apps/resource-booking` (§10e) — the first app with one. `marketing`/`finance` still have none; their demo actions remain local state only |
-| Server-side enforcement of write/edit/delete | app-specific backend, calling `/session/verify-permission` | Done — `services/booking-api` (§10e) is the first real caller of the native gate this section originally only described |
+| Real mutating backend per app | each `apps/<name>` | Done for `apps/resource-booking` (§10e), and now mechanical for the next one via `services/_template` + `@centralhub/service-kit` (§10f). `marketing`/`finance` still have none; their demo actions remain local state only |
+| Server-side enforcement of write/edit/delete | app-specific backend, via `@centralhub/service-kit`'s `createAuth()` → `/session/context` | Done — `services/booking-api` (§10e/§10f) is the reference consumer |
+| Older services (`auth-gateway`, `inference-gateway`) still use the `npm install --omit=dev` Dockerfile pattern | `services/auth-gateway/Dockerfile`, `services/inference-gateway/Dockerfile` | Neither depends on a workspace package, so the pattern still works for them; only kit consumers need `pnpm deploy` (§10f). Harmonizing is cosmetic, not required |
+| Unit tests beyond `service-kit` | `services/auth-gateway` (session/permission/revocation logic) | §10f set the vitest pattern (`pnpm test:unit`); the platform's own authz-critical helpers are still only covered end-to-end by `test-stack.mjs` |
 | Per-record / field-level permissions | `app_permissions` table design | Current granularity is per (user, app) only |
 | Per-session (`jti`) tracking / "your active sessions" UI | `session_revocations` table design | Current granularity is per-user (kill all sessions), not per-device — see §8 |
 | Production-safe credentials | `keycloak/realm-export.json`, `.env` | `dev-admin`/`dev-user`/client secret are dev-only seed data — see §6, §7 |
 | Replace app-local department vocabularies with CentralHub's official `attribute_values` list directly, retiring alias/mapping tables | `apps/engineering`'s own `departments` table (and `DeptAliasSection`'s mapping into it); the equivalent for `apps/assets`'s department-shaped demo data (`cc_recipient`/`recipient`) | `apps/engineering`'s `departments` is a real FK'd entity (machines, repair jobs, profiles reference `department_id`), so collapsing it onto `attribute_values` means either migrating those FKs to reference names directly or a synced mirror table — materially larger than the CRUD/dropdown work above, which only touched the CentralHub-side picker, not each app's own department model |
 | `apps/admin` responsive/multi-device redesign | `apps/admin/src/App.tsx` (4 inline `DataTable`-heavy panels: Permissions, Users, Audit), `components/AppsPanel.tsx`, shared `packages/ui/src/components/AppShell.tsx` header | `central-hub`'s landing page got a full responsive pass (§9); admin is still desktop-first (no admin-authored breakpoints beyond `AppShell`'s incidental `p-4 sm:p-6 lg:p-8`). Meaningfully bigger scope than central-hub's card-grid rework — `DataTable` has no card/stacked-row fallback, so each of the 4 tables would need its own narrow-viewport treatment, not just header/spacing polish. Deferred to its own session by request |
 | Notifications: realtime delivery (SSE/WebSocket) | services/auth-gateway's `routes/notifications.ts`, `packages/ui`'s `NotificationBell` | v1 is polling only (30s, paused on a hidden tab) — no realtime infra exists in this repo for anything, and one feature isn't reason enough to add it. The read endpoints are shaped so an SSE stream could be added on top without changing them |
-| Notifications: app-originated events (e.g. an engineering repair-job assignment notifying the new assignee) | a future `<app>-db` trigger → local outbox table → forwarder calling `POST /internal/notifications` server-to-server | Phase 1 (this pass) only wired auth-gateway's own events (permission grants, session revoke, admin announcements) — no app cooperation needed for that. A trusted app-originated event needs the trigger-writes-after-RLS pattern (never a browser asserting "notify this user," which is a spoofing surface) — designed, not built |
+| Notifications: app-originated events from **third-party** (RLS) apps, e.g. an engineering repair-job assignment notifying the new assignee | a future `<app>-db` trigger → local outbox table → forwarder calling `POST /internal/notifications` server-to-server | **First-party backends are done** (§10f): `service-kit`'s `notify()` calls `/internal/notifications` directly, and booking's admin-override cancel is the first live producer. Third-party apps can't be trusted to call it (a browser asserting "notify this user" is a spoofing surface), so they still need the trigger-writes-after-RLS outbox pattern — designed, not built |
 | Notifications: announcement audience targeting beyond all-users (department/role/specific users) | `services/auth-gateway/src/routes/adminAnnouncements.ts`, `apps/admin`'s Announce panel | `POST /auth/admin/announcements` fans out to every user via `listUsers()`; per-department/role targeting would reuse the same `user_attributes`/`user_roles` lookups §7/§10's role-rule resolution already does, just not wired into this endpoint yet |
 | Notifications: per-user preferences / mute / per-type opt-out | `notifications` table (`type` column) | The `type` column (`info`/`success`/`warning`/`action_required`) leaves room for a future preference to filter on; nothing reads it that way yet |
 | Notifications: retention / prune job | `notifications` table | The list endpoint is simply bounded (most recent 50 per recipient) — no prune job yet, same "no retention job needed at this scale" posture as `audit_log` (§7) |
@@ -1856,7 +2002,10 @@ pnpm stack:up
   unread-count correctness, all four Phase 1 producers (permission grant
   single + bulk, session revoke, admin announcement), mark-read/read-all,
   and that `/internal/notifications` isn't reachable through the public
-  gateway — each producer assertion is delta-based (count-before vs.
+  gateway; and §10f's backend factory: `/session/context`, the generic
+  `/apps/<id>/api/` block's bare 401/403, and the admin-override cancel's
+  app-originated notification landing in the owner's unread count — each
+  producer assertion is delta-based (count-before vs.
   count-after around the action) rather than an absolute count, since this
   suite is meant to be rerunnable against the same persistent stack without
   a restart and notification rows accumulate as real history, unlike the
@@ -2058,7 +2207,59 @@ pnpm stack:up
 For whoever (human or agent) picks this repo up next — what changed most
 recently, and where to look first.
 
-**What just happened**: built `apps/resource-booking` + `services/booking-api`
+**What just happened**: a platform consolidation pass (§10f) rather than a
+new app. Started from a "is the foundation ready for more mini-apps?"
+review of the previous session's resource-booking work: it had exposed
+that only the frontend half of the app factory was templated — the
+backend was hand-built, every future backend would re-copy its auth/db
+boilerplate, hand-write an Nginx block, and had no way to emit
+notifications. Built `packages/service-kit` (auth middleware over a new
+one-call `GET /session/context`, Pool/retry, **tracked migrations**,
+`notify()`, health), `services/_template`, generic
+`/apps/<id>/api/` → `api-<id>:4200` Nginx routing (per-app block deleted,
+compose service renamed `api-resource-booking`), migrated booking-api onto
+the kit as the reference consumer, and wired the first app-originated
+notification (admin cancels your booking → you're told). Docker gotcha
+solved along the way: a service depending on a `workspace:*` package
+can't use the older `npm install` runtime stage — kit consumers use
+`pnpm deploy`. Two real bugs surfaced by the tests and fixed: a latent
+same-second revoke-vs-relogin race in `revocation.ts` (Phase 5 era), and
+`test-stack.mjs` §6d's title-count deltas saturating at the 50-row list
+cap. Live browser testing then found the admin-override cancel had never
+had a UI (chips were display-only) — added a × on chips for own/
+`delete`-permitted bookings.
+
+**Verification**: `pnpm test:unit` 16/16 (first unit tests in the repo);
+`pnpm test:stack` **148/148** (was 137), run twice back-to-back against
+the persistent stack; `0001_init` confirmed recorded once in
+`schema_migrations` on the existing `booking_pgdata` volume and a no-op
+on every restart since; the deployed `api-resource-booking` image
+confirmed to contain the kit's `dist`; browser: dev-admin cancels
+dev-user's booking via the chip ×, dev-user's bell shows the warning
+with a working link. **Not** re-verified against a fresh volume
+(`down -v`) — still outstanding since several sessions.
+
+**Files touched this session**: new `packages/service-kit/` and
+`services/_template/`; `services/auth-gateway/src/routes/session.ts`
+(`/session/context`), `services/auth-gateway/src/revocation.ts` (bug fix);
+`services/booking-api/` (Dockerfile, package.json, `src/{auth,config,db,index}.ts`
+collapsed onto the kit, new `src/migrations.ts`, `src/routes/*.ts`);
+`apps/resource-booking/src/{lib/api.ts,components/BookingBoard.tsx}`;
+`gateway/conf.d/default.conf`; `environments/docker-compose.yml`; root
+`package.json` (`test:unit`, `dev:booking-api`); `pnpm-lock.yaml`;
+`scripts/test-stack.mjs`; this README. One new dev dependency (`vitest`,
+in `packages/service-kit`).
+
+**Where to go next**: the foundation is now genuinely ready for more
+mini-apps — the next backend-bearing app should take the
+`services/_template` checklist at face value and report anything it still
+had to hand-edit. Remaining platform items are in §13 (admin responsive
+redesign, fresh-volume check, unit tests for auth-gateway's own authz
+helpers).
+
+---
+
+**Older handoff, preserved below for now**: built `apps/resource-booking` + `services/booking-api`
 (§10e) — a room-booking app, and the first app in this repo with a real
 mutating backend, closing a gap every earlier section only ever described
 (§7's native gate had no caller; §13 tracked "real mutating backend per app"

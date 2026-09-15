@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, MapPin, Users } from "lucide-react";
+import { ChevronLeft, ChevronRight, MapPin, Users, X } from "lucide-react";
 import { Badge, Button, Card, ConfirmDialog, EmptyState, Input, Select, Skeleton, useToast } from "@centralhub/ui";
 import {
   ApiError,
@@ -124,6 +124,12 @@ export function BookingBoard({ permissions }: { permissions: PermissionSet | nul
     }
   });
 
+  // The API doesn't expose owner subs (and the frontend never learns its
+  // own sub) — "mine" is simply membership in GET /bookings/mine.
+  function isOwn(b: Booking): boolean {
+    return myBookings?.some((m) => m.id === b.id) ?? false;
+  }
+
   async function confirmCancel() {
     if (!cancelTarget) return;
     try {
@@ -232,19 +238,41 @@ export function BookingBoard({ permissions }: { permissions: PermissionSet | nul
                     <p className="mt-2 text-xs text-text-muted">Free all day.</p>
                   ) : (
                     <ul className="mt-2 flex flex-wrap gap-2">
-                      {roomBookings.map((b) => (
-                        <li
-                          key={b.id}
-                          className="flex items-center gap-1.5 rounded-full border border-border bg-bg px-3 py-1 text-xs"
-                        >
-                          <span className="font-medium text-text">
-                            {formatTime(b.startsAt)}–{formatTime(b.endsAt)}
-                          </span>
-                          <span className="text-text-muted">
-                            {b.title} · {b.userName}
-                          </span>
-                        </li>
-                      ))}
+                      {roomBookings.map((b) => {
+                        // Cancel is offered on a chip when the viewer can
+                        // actually act on it: their own booking (always
+                        // allowed server-side), or anyone's if they hold
+                        // `delete` — the admin-override path the backend has
+                        // supported since day one but which only "Your
+                        // upcoming bookings" (own rows only) ever exposed.
+                        const canCancel = isOwn(b) || permissions?.delete === true;
+                        return (
+                          <li
+                            key={b.id}
+                            className="flex items-center gap-1.5 rounded-full border border-border bg-bg py-1 pl-3 pr-1.5 text-xs"
+                          >
+                            <span className="font-medium text-text">
+                              {formatTime(b.startsAt)}–{formatTime(b.endsAt)}
+                            </span>
+                            <span className="text-text-muted">
+                              {b.title} · {isOwn(b) ? "you" : b.userName}
+                            </span>
+                            {canCancel ? (
+                              <button
+                                type="button"
+                                onClick={() => setCancelTarget(b)}
+                                aria-label={`Cancel ${b.title}`}
+                                title={isOwn(b) ? "Cancel your booking" : `Cancel ${b.userName}'s booking`}
+                                className="ml-0.5 rounded-full p-0.5 text-text-muted hover:bg-border hover:text-text"
+                              >
+                                <X className="h-3.5 w-3.5" />
+                              </button>
+                            ) : (
+                              <span className="w-1.5" />
+                            )}
+                          </li>
+                        );
+                      })}
                     </ul>
                   )}
                 </div>
