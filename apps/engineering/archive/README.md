@@ -12,9 +12,32 @@ indexes what's here.
 | Directory | Corresponds to | Source |
 |---|---|---|
 | `20260716-baseline/` | Initial ingestion (§10b) — matches the `20260716*` migration timestamp prefix in `apps/engineering/db/migrations/` | Lovable export, project name "fix-hand-off-main" / "BigOne" (`bgone`), hosted Supabase project ref `xhkjaeapzuzvequgdode` |
+| `20260915-update/` | First post-ingestion update (§10d) — the repair-scheduling feature + UI polish, matches the `20260915*` migration timestamp prefix. `data/` holds the hosted instance's table exports taken the same day (see below) | Same Lovable project, re-exported 2026-09-15; hosted project ref unchanged |
 
-No update snapshots yet — this app hasn't been re-pulled from Lovable since
-ingestion.
+## `20260915-update/data/` — hosted-instance table exports (NOT imported)
+
+Semicolon-delimited CSVs exported from the hosted Supabase project's
+dashboard on 2026-09-15, one per table: `departments`, `machine_types`,
+`machines`, `repair_jobs`, `parts_requisitions`, `profiles`,
+`user_roles`. Kept here **as reference data only** — none of it has been
+loaded into `engineering-db`, deliberately: every row that references a
+person carries a hosted Supabase Auth uid, which has no equivalent in
+CentralHub until the matching Keycloak users exist and a uid → Keycloak-sub
+mapping is provided, and the hosted `departments` table mixes this app's
+own repair sub-groups with company departments that CentralHub's platform
+`attribute_values` list is meant to own. Importing before those mappings
+exist would mean NULLed FKs and throwaway "legacy name" columns; the
+decision was to wait and import once, cleanly. The main README's §13 lists
+the exact prerequisites. Notes for whoever does that import:
+
+- Some fields contain literal tab characters (e.g. `part_code`); empty
+  string means NULL; `parts_used` is JSON with doubled quotes.
+- `profiles.csv` still has the three columns this ingestion dropped
+  (`active_session_id`, `active_session_seen_at`, `allowed_repair_dept_ids`)
+  — ignore them. The session ids are long-dead hosted-session tokens, not
+  credentials.
+- `repair_jobs.csv` already includes the scheduling columns this update's
+  migration adds, so it loads against the post-update schema as-is.
 
 ## What was stripped from the raw export, and why
 

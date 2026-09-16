@@ -58,6 +58,7 @@ export type IdTokenClaims = {
 export async function completeLogin(code: string): Promise<{
   sub: string;
   name: string;
+  username: string;
   email: string;
   roles: string[];
   idToken: string;
@@ -73,6 +74,10 @@ export async function completeLogin(code: string): Promise<{
   return {
     sub: claims.sub,
     name: claims.name ?? claims.preferred_username ?? "Unknown",
+    // Keycloak login name (preferred_username) — the human-readable
+    // identifier apps show next to a display name (apps/engineering's
+    // profiles.code), where a sub fragment would mean nothing to a user.
+    username: claims.preferred_username ?? "",
     email: claims.email ?? "",
     roles: claims.realm_access?.roles ?? [],
     // Raw JWT, kept only to pass as id_token_hint to Keycloak's end-session

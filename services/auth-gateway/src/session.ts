@@ -11,6 +11,9 @@ export type SessionInput = {
   sub: string;
   name: string;
   email: string;
+  // Optional only for tokens minted before it existed (an 8h session that
+  // straddles the deploy); every fresh login sets it.
+  username?: string;
 };
 
 export type SessionClaims = SessionInput & {
@@ -48,6 +51,7 @@ export async function verifySession(token: string): Promise<SessionClaims | null
       sub: payload.sub,
       name: payload.name,
       email: payload.email,
+      ...(typeof payload.username === "string" ? { username: payload.username } : {}),
       issuedAt: new Date(payload.iat * 1000),
     };
   } catch {

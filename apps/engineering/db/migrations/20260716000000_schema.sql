@@ -16,6 +16,31 @@
 -- statement here is idempotent (IF NOT EXISTS / OR REPLACE / ON CONFLICT),
 -- so re-running it against an already-migrated volume (e.g. a restart) is
 -- safe and cheap, no "already migrated" guard needed.
+--
+-- VOCABULARY — two different things are both called "department" in this
+-- app's history, and the table name below keeps the upstream one so future
+-- Lovable exports still 3-way-merge cleanly (README §10d). Read them as:
+--
+--   * DEPARTMENT (แผนก) — where an employee actually works: CentralHub's
+--     user_attributes.department ("Quality Control", "Purchasing", …).
+--     Owned by the platform, carried into this DB only as the minted JWT's
+--     dept_name claim; NEVER stored in a table here.
+--   * REPAIR GROUP (สังกัดช่าง) — an engineering sub-group that takes
+--     repair jobs: ช่างผลิต / ช่างบรรจุ / ช่างทั่วไป. This is what
+--     public.departments actually holds, and what every department_id FK
+--     in this schema (profiles, repair_jobs, parts_requisitions,
+--     machines.repair_department_id, machine_types.department_id) points
+--     at. current_dept() returns a repair group, not a department.
+--   * ROUTING — department_aliases ("this DEPARTMENT's jobs go to this
+--     REPAIR GROUP", bulk) and department_user_overrides (per user) are the
+--     mapping between the two; profiles.department_id caches the result.
+--     "Quality Control → ช่างผลิต" means the ช่างผลิต crew is responsible
+--     for Quality Control's machines — it does not mean a QC employee is
+--     "in" ช่างผลิต.
+--
+-- The UI uses แผนก only for the first and สังกัด/สังกัดช่าง for the
+-- second; the hosted Lovable instance blurred them (its own departments
+-- table mixed both kinds — see README §13's data-import prerequisites).
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 

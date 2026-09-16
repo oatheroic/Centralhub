@@ -1,0 +1,1 @@
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS allowed_repair_dept_ids uuid[] NOT NULL DEFAULT '{}'::uuid[];

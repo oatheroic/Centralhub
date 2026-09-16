@@ -75,6 +75,11 @@ dataTokenRouter.get("/data-token", async (req, res) => {
       // ensure_profile()) instead of falling back to a code/uid fragment.
       // Harmless extra claim for apps that don't read it.
       name: claims.name,
+      // Keycloak login name, for the same reason as `name` — a stable,
+      // human-readable identifier (apps/engineering's profiles.code shows it
+      // as "who filed this job"). Absent only on a session minted before
+      // this claim existed.
+      ...(claims.username ? { username: claims.username } : {}),
       ...(roleCode ? { role_code: roleCode } : {}),
       ...(attrs?.department ? { dept_name: attrs.department } : {}),
     })

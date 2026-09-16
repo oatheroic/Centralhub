@@ -4,10 +4,11 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { StatusBadge } from "@/components/StatusBadge";
+import { JobStatusChips } from "@/components/JobStatusChips";
 import { supabase } from "@/integrations/supabase/client";
-import { STATUS_LABEL } from "@/lib/auth-utils";
+import { STATUS_LABEL, SCHEDULE_MODE_LABEL, thaiDate } from "@/lib/auth-utils";
 import { exportJobAsPdf } from "@/lib/pdf-export";
+import { loadRejections, type RejectionEntry } from "@/lib/jobHistory";
 
 export type JobDetail = {
   id: string;
@@ -18,6 +19,7 @@ export type JobDetail = {
   created_at: string;
   reporter_id: string;
   assigned_to: string | null;
+  assigned_at?: string | null;
   department_id: string | null;
   machine_type_id?: string | null;
   machine_id?: string | null;
@@ -28,6 +30,11 @@ export type JobDetail = {
   reject_reason: string | null;
   work_summary: string | null;
   parts_used: unknown;
+  schedule_mode?: string | null;
+  scheduled_repair_date?: string | null;
+  schedule_deadline?: string | null;
+  parts_ready?: boolean | null;
+  cancelled_at?: string | null;
 };
 
 type Part = { code?: string; name?: string; qty?: string };
@@ -40,16 +47,20 @@ export function JobDetailDialog({
   const [dept, setDept] = useState<string>("-");
   const [machineType, setMachineType] = useState<string>("-");
   const [machine, setMachine] = useState<string>("-");
+  const [rejections, setRejections] = useState<(RejectionEntry & { actor_name: string })[]>([]);
 
   useEffect(() => {
     if (!job) return;
     // Reset to placeholders so a previous job's details never leak into the
     // newly-opened dialog while the fresh fetch is still in flight.
-    setReporter("-"); setAssignee("-"); setDept("-"); setMachineType("-"); setMachine("-");
+    setReporter("-"); setAssignee("-"); setDept("-"); setMachineType("-"); setMachine("-"); setRejections([]);
     let cancelled = false;
     (async () => {
       try {
-        const ids = [job.reporter_id, job.assigned_to].filter(Boolean) as string[];
+        const history = await loadRejections(job.id);
+        const ids = Array.from(new Set(
+          [job.reporter_id, job.assigned_to, ...history.map((h) => h.actor_id)].filter(Boolean) as string[],
+        ));
         const [{ data: profs }, { data: d }, { data: mt }, { data: mc }] = await Promise.all([
           ids.length
             ? supabase.from("profiles").select("id, full_name").in("id", ids)
@@ -69,6 +80,7 @@ export function JobDetailDialog({
         (profs ?? []).forEach((p) => m.set(p.id, p.full_name));
         setReporter(m.get(job.reporter_id) ?? "-");
         setAssignee(job.assigned_to ? (m.get(job.assigned_to) ?? "-") : "-");
+        setRejections(history.map((h) => ({ ...h, actor_name: h.actor_id ? (m.get(h.actor_id) ?? "-") : "-" })));
         setDept((d as { name?: string } | null)?.name ?? "-");
         setMachineType((mt as { name?: string } | null)?.name ?? "-");
         const mcData = mc as { name?: string; code?: string | null } | null;
@@ -89,7 +101,7 @@ export function JobDetailDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <span className="font-mono text-brand">{job.job_code}</span>
-            <StatusBadge status={job.status} />
+            <JobStatusChips job={job} />
             {allowPdf && (
               <Button
                 size="sm" variant="outline" className="ml-auto"
@@ -107,11 +119,23 @@ export function JobDetailDialog({
         </DialogHeader>
         <div className="space-y-3 text-sm">
           <Row label="ผู้แจ้ง" value={reporter} />
-          <Row label="แผนก" value={dept} />
+          <Row label="สังกัดช่าง" value={dept} />
           <Row label="ประเภทเครื่อง" value={machineType} />
           <Row label="เครื่องจักร" value={machine} />
           <Row label="ผู้ซ่อมที่รับผิดชอบ" value={assignee} />
           <Row label="วันที่แจ้ง" value={new Date(job.created_at).toLocaleString("th-TH")} />
+          {job.schedule_mode && (
+            <Row
+              label="กำหนดวันซ่อม"
+              value={
+                job.scheduled_repair_date
+                  ? thaiDate(job.scheduled_repair_date)
+                  : (SCHEDULE_MODE_LABEL[job.schedule_mode] ?? job.schedule_mode) +
+                    (job.schedule_deadline ? ` (หมดเขต ${thaiDate(job.schedule_deadline)})` : "")
+              }
+            />
+          )}
+          {job.cancelled_at && <Row label="ยกเลิกเมื่อ" value={new Date(job.cancelled_at).toLocaleString("th-TH")} />}
           {job.completed_at && <Row label="วันที่ซ่อมเสร็จ" value={new Date(job.completed_at).toLocaleString("th-TH")} />}
           {job.reviewed_at && <Row label="วันที่ตรวจรับ" value={new Date(job.reviewed_at).toLocaleString("th-TH")} />}
           {job.description && (
@@ -161,10 +185,26 @@ export function JobDetailDialog({
               </a>
             </div>
           )}
-          {job.reject_reason && (
+          {(rejections.length > 0 || job.reject_reason) && (
             <div>
-              <div className="text-muted-foreground text-xs mb-1">เหตุผลที่ปฏิเสธ</div>
-              <div className="border rounded-md p-2 text-destructive">{job.reject_reason}</div>
+              <div className="text-muted-foreground text-xs mb-1">
+                ประวัติการปฏิเสธงาน{rejections.length > 1 ? ` (${rejections.length} ครั้ง)` : ""}
+              </div>
+              <div className="border rounded-md divide-y">
+                {rejections.length === 0 ? (
+                  // Rejected before job_history logging existed — only the
+                  // latest reason survived on the job itself.
+                  <div className="p-2 text-destructive">{job.reject_reason}</div>
+                ) : rejections.map((r, i) => (
+                  <div key={r.id} className={`p-2 ${i === 0 ? "text-destructive" : "text-muted-foreground"}`}>
+                    <div className="text-xs">
+                      {new Date(r.created_at).toLocaleString("th-TH")} · {r.actor_name}
+                      {i === 0 && <span className="ml-1 status-pill bg-red-100 text-red-800">ล่าสุด</span>}
+                    </div>
+                    <div className="whitespace-pre-wrap">{r.note}</div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
           <div className="text-xs text-muted-foreground pt-2 border-t">

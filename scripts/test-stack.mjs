@@ -931,6 +931,7 @@ async function main() {
     const body = await res.json().catch(() => null);
     ok("POST rpc/ensure_profile -> 200", res.status === 200, `status ${res.status}`);
     ok("full_name is a real display name, not the sub-derived short code", typeof body?.full_name === "string" && body.full_name.length > 0, JSON.stringify(body));
+    ok("code is the Keycloak username (JWT username claim), not the sub-derived short code", body?.code === "dev-admin", JSON.stringify(body));
     ok("last_seen_at was just refreshed", typeof body?.last_seen_at === "string" && Date.now() - new Date(body.last_seen_at).getTime() < 60_000, JSON.stringify(body));
   });
 
@@ -1037,6 +1038,19 @@ async function main() {
         restoreRes.status === 200 || restoreRes.status === 201,
         `status ${restoreRes.status}`,
       );
+      // 20260915000002_group_override_sync.sql: the override write itself
+      // must re-sync the cached profiles.department_id, without waiting for
+      // dev-user's next ensure_profile() — LeaderPage's roster reads the
+      // cache, and before the trigger this restore left it pointing at the
+      // test's temporary group until dev-user's next page load.
+      const cached = await getJson(admin, `${ENG_REST}/profiles?id=eq.${userSub}&select=department_id`, {
+        headers: { Authorization: `Bearer ${engAdminToken}` },
+      });
+      ok(
+        "cached profiles.department_id re-synced by the override trigger",
+        cached.body?.[0]?.department_id === existing.department_id,
+        JSON.stringify(cached.body),
+      );
     } else {
       const delRes = await hop(admin, `${ENG_REST}/department_user_overrides?user_sub=eq.${userSub}`, {
         method: "DELETE",
@@ -1061,6 +1075,52 @@ async function main() {
       batchRes.body?.[userSub] === "repairer" && batchRes.body?.[adminSub] === "admin",
       JSON.stringify(batchRes.body),
     );
+  });
+
+  await must("repair scheduling update (§10d): new columns live on the existing volume, expire_pending_schedules() cancels an overdue within_10_days job", async () => {
+    // The first post-ingestion Lovable update (README §10d, migration
+    // 20260915000000_repair_scheduling.sql). Runs against whatever
+    // repair_jobs rows already exist rather than inserting one: only the
+    // reporter role can INSERT (see the RLS test above) and neither dev
+    // account is a reporter, but admin's UPDATE policy covers any job —
+    // so the test borrows a pending_assign job, pushes it past its
+    // deadline, expires it, and restores it afterwards.
+    const engHeaders = { Authorization: `Bearer ${engAdminToken}`, "content-type": "application/json", prefer: "return=representation" };
+    const list = await getJson(admin, `${ENG_REST}/repair_jobs?status=eq.pending_assign&cancelled_at=is.null&select=id,job_code,schedule_mode,scheduled_repair_date,schedule_deadline,parts_ready,cancelled_at&limit=1`, { headers: engHeaders });
+    ok("GET repair_jobs with the new scheduling columns -> 200", list.status === 200, `status ${list.status}`);
+    const job = list.body?.[0];
+    ok("at least one pending_assign job exists to exercise the feature", Boolean(job?.id), JSON.stringify(list.body));
+    if (!job?.id) return;
+    ok("pre-update rows read parts_ready=false (NOT NULL DEFAULT) with NULL scheduling fields, no backfill needed", job.parts_ready === false && job.cancelled_at === null, JSON.stringify(job));
+
+    const pastDeadline = new Date(Date.now() - 60_000).toISOString();
+    const arm = await getJson(admin, `${ENG_REST}/repair_jobs?id=eq.${job.id}`, {
+      method: "PATCH", headers: engHeaders,
+      body: JSON.stringify({ schedule_mode: "within_10_days", scheduled_repair_date: null, schedule_deadline: pastDeadline }),
+    });
+    ok("admin PATCH schedule fields -> 200", arm.status === 200, `status ${arm.status} ${JSON.stringify(arm.body)}`);
+
+    const expire = await hop(admin, `${ENG_REST}/rpc/expire_pending_schedules`, { method: "POST", headers: engHeaders, body: "{}" });
+    ok("POST rpc/expire_pending_schedules as engineering_authenticated -> 2xx (EXECUTE grant present)", expire.status >= 200 && expire.status < 300, `status ${expire.status}`);
+
+    const after = await getJson(admin, `${ENG_REST}/repair_jobs?id=eq.${job.id}&select=cancelled_at,status`, { headers: engHeaders });
+    ok("overdue within_10_days job now has cancelled_at set", typeof after.body?.[0]?.cancelled_at === "string", JSON.stringify(after.body));
+    ok("status itself is untouched (cancellation is derived from cancelled_at, not a new enum value)", after.body?.[0]?.status === "pending_assign", JSON.stringify(after.body));
+
+    const restore = await getJson(admin, `${ENG_REST}/repair_jobs?id=eq.${job.id}`, {
+      method: "PATCH", headers: engHeaders,
+      body: JSON.stringify({ schedule_mode: job.schedule_mode, scheduled_repair_date: job.scheduled_repair_date, schedule_deadline: job.schedule_deadline, cancelled_at: null }),
+    });
+    ok("borrowed job restored to its pre-test scheduling state", restore.status === 200 && restore.body?.[0]?.cancelled_at === null, `status ${restore.status}`);
+
+    // 20260915000003_job_history_kind.sql: rejections are append-only rows
+    // on job_history (kind='reject') so a second rejection no longer
+    // overwrites the first reason. Read-only check that the column is live
+    // through PostgREST (400 if the schema cache doesn't know it) — not a
+    // write, since job_history has no DELETE policy and a test row would
+    // show up as a real "rejection" in that job's detail dialog.
+    const histRead = await getJson(admin, `${ENG_REST}/job_history?job_id=eq.${job.id}&kind=eq.reject&select=id,note,kind,created_at`, { headers: engHeaders });
+    ok("GET job_history filtered by the new kind column -> 200", histRead.status === 200 && Array.isArray(histRead.body), `status ${histRead.status} ${JSON.stringify(histRead.body)}`);
   });
 
   // -- 10. Inference gateway is reachable only when authenticated (§12) -----

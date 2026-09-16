@@ -1,0 +1,1 @@
+ALTER TABLE public.machine_types ADD COLUMN IF NOT EXISTS department_id uuid REFERENCES public.departments(id) ON DELETE SET NULL;

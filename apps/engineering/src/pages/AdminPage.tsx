@@ -38,6 +38,7 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import RoleRulesPanel from "@/components/RoleRulesPanel";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import AuditLogPanel from "@/components/AuditLogPanel";
 import { useAuth } from "@/hooks/useAuth";
 import { logAudit } from "@/lib/audit";
 import { STATUS_LABEL, LEADER_DEPT_NAMES, ROLE_LABEL, type AppRole } from "@/lib/auth-utils";
@@ -130,7 +131,7 @@ function AdminPage() {
           <TabsTrigger value="users"><Users className="size-4 mr-1" />ผู้ใช้งาน</TabsTrigger>
           <TabsTrigger value="access"><KeyRound className="size-4 mr-1" />สิทธิ์การเข้าถึง</TabsTrigger>
           <TabsTrigger value="setup"><Building2 className="size-4 mr-1" />แผนก/เครื่องจักร</TabsTrigger>
-          <TabsTrigger value="audit"><History className="size-4 mr-1" />ประวัติการดำเนินการ</TabsTrigger>
+          <TabsTrigger value="audit"><History className="size-4 mr-1" />บันทึกการดำเนินการ</TabsTrigger>
         </TabsList>
 
         <TabsContent value="status"><JobList jobs={filteredJobs(["pending_assign","in_progress","waiting_parts","external","awaiting_review"])} onView={setDetail} onEdit={setEditJob} reload={loadAll} depts={depts} /></TabsContent>
@@ -150,7 +151,7 @@ function AdminPage() {
           <SetupTab depts={depts} mtypes={mtypes} machines={machines} reload={loadAll} />
         </TabsContent>
         <TabsContent value="audit">
-          <AuditTab />
+          <AuditLogPanel />
         </TabsContent>
       </Tabs>
 
@@ -579,11 +580,24 @@ function SetupTab({ depts, mtypes, machines, reload }:
   const [deptName, setDeptName] = useState("");
   const [mtName, setMtName] = useState("");
   const [mtDeptId, setMtDeptId] = useState<string>("none");
+  const [mtSearch, setMtSearch] = useState("");
   const [openTypeId, setOpenTypeId] = useState<string | null>(null);
   const [machName, setMachName] = useState("");
   const [machRepairDeptId, setMachRepairDeptId] = useState<string>("none");
+  const [editMach, setEditMach] = useState<Machine | null>(null);
+  const [editMachName, setEditMachName] = useState("");
+  const [editMachTypeId, setEditMachTypeId] = useState<string>("");
+  const [editMt, setEditMt] = useState<MType | null>(null);
+  const [editMtName, setEditMtName] = useState("");
+  const [editMtDeptId, setEditMtDeptId] = useState<string>("none");
 
   const repairDeptChoices = depts.filter((d) => (LEADER_DEPT_NAMES as readonly string[]).includes(d.name));
+
+  const filteredMtypes = useMemo(() => {
+    const s = mtSearch.trim().toLowerCase();
+    if (!s) return mtypes;
+    return mtypes.filter((t) => t.name.toLowerCase().includes(s));
+  }, [mtypes, mtSearch]);
 
   const addDept = async () => {
     if (!deptName.trim()) return;
@@ -621,6 +635,40 @@ function SetupTab({ depts, mtypes, machines, reload }:
     if (error) toast.error(error.message); else { await reload(); toast.success("อัปเดตสังกัดผู้ซ่อมแล้ว"); }
   };
 
+  const openEditMach = (m: Machine) => {
+    setEditMach(m);
+    setEditMachName(m.name);
+    setEditMachTypeId(m.machine_type_id ?? "");
+  };
+  const saveEditMach = async () => {
+    if (!editMach) return;
+    if (!editMachName.trim()) { toast.error("กรอกชื่อเครื่อง"); return; }
+    if (!editMachTypeId) { toast.error("เลือกประเภทเครื่อง"); return; }
+    const { error } = await supabase.from("machines").update({
+      name: editMachName.trim(),
+      machine_type_id: editMachTypeId,
+    }).eq("id", editMach.id);
+    if (error) toast.error(error.message);
+    else { setEditMach(null); await reload(); toast.success("บันทึกแล้ว"); }
+  };
+
+  const openEditMt = (t: MType) => {
+    setEditMt(t);
+    setEditMtName(t.name);
+    setEditMtDeptId(t.department_id ?? "none");
+  };
+  const saveEditMt = async () => {
+    if (!editMt) return;
+    if (!editMtName.trim()) { toast.error("กรอกชื่อประเภท"); return; }
+    const { error } = await supabase.from("machine_types").update({
+      name: editMtName.trim(),
+      department_id: editMtDeptId === "none" ? null : editMtDeptId,
+    }).eq("id", editMt.id);
+    if (error) toast.error(error.message);
+    else { setEditMt(null); await reload(); toast.success("บันทึกแล้ว"); }
+  };
+
+
   const del = async (table: "departments" | "machine_types" | "machines", id: string) => {
     if (!confirm("ลบรายการนี้?")) return;
     const { error } = await supabase.from(table).delete().eq("id", id);
@@ -632,9 +680,9 @@ function SetupTab({ depts, mtypes, machines, reload }:
   return (
     <div className="grid md:grid-cols-2 gap-4">
       <div className="card-soft p-5 space-y-3">
-        <h3 className="font-bold">แผนก / สังกัด</h3>
+        <h3 className="font-bold">สังกัดช่าง (หน่วยรับงานซ่อม)</h3>
         <div className="flex gap-2">
-          <Input value={deptName} onChange={(e) => setDeptName(e.target.value)} placeholder="ชื่อแผนก" />
+          <Input value={deptName} onChange={(e) => setDeptName(e.target.value)} placeholder="ชื่อสังกัดช่าง เช่น ช่างผลิต" />
           <Button onClick={addDept}><Plus className="size-4" /></Button>
         </div>
         <ul className="text-sm divide-y">
@@ -653,17 +701,24 @@ function SetupTab({ depts, mtypes, machines, reload }:
           <Input value={mtName} onChange={(e) => setMtName(e.target.value)} placeholder="เช่น เตาอบ, แอร์" />
           <div className="flex gap-2">
             <Select value={mtDeptId} onValueChange={setMtDeptId}>
-              <SelectTrigger><SelectValue placeholder="แผนกที่รับผิดชอบ" /></SelectTrigger>
+              <SelectTrigger><SelectValue placeholder="สังกัดช่างที่รับผิดชอบ" /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="none">— ไม่ระบุแผนก —</SelectItem>
+                <SelectItem value="none">— ไม่ระบุสังกัดช่าง —</SelectItem>
                 {depts.map((d) => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}
               </SelectContent>
             </Select>
             <Button onClick={addMt}><Plus className="size-4" /></Button>
           </div>
         </div>
+        <div className="pt-2">
+          <Input
+            value={mtSearch}
+            onChange={(e) => setMtSearch(e.target.value)}
+            placeholder="กรองประเภทเครื่อง เช่น เลเตอร์, แอร์"
+          />
+        </div>
         <ul className="text-sm divide-y">
-          {mtypes.map((t) => {
+          {filteredMtypes.map((t) => {
             const list = machines.filter((m) => m.machine_type_id === t.id);
             const deptName = depts.find((d) => d.id === t.department_id)?.name;
             return (
@@ -671,11 +726,14 @@ function SetupTab({ depts, mtypes, machines, reload }:
                 <div className="flex justify-between items-center gap-2">
                   <div className="min-w-0">
                     <div className="font-medium">{t.name}</div>
-                    {deptName && <div className="text-xs text-muted-foreground">แผนก: {deptName}</div>}
+                    {deptName && <div className="text-xs text-muted-foreground">สังกัดช่าง: {deptName}</div>}
                   </div>
                   <div className="flex items-center gap-1">
                     <Button variant="outline" size="sm" onClick={() => { setOpenTypeId(t.id); setMachName(""); }}>
                       <Plus className="size-4 mr-1" /> เพิ่มเครื่อง
+                    </Button>
+                    <Button variant="ghost" size="icon" onClick={() => openEditMt(t)}>
+                      <Pencil className="size-4" />
                     </Button>
                     <Button variant="ghost" size="icon" onClick={() => del("machine_types", t.id)}>
                       <Trash2 className="size-4 text-destructive" />
@@ -705,6 +763,9 @@ function SetupTab({ depts, mtypes, machines, reload }:
                                 {repairDeptChoices.map((d) => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}
                               </SelectContent>
                             </Select>
+                            <Button variant="ghost" size="icon" onClick={() => openEditMach(m)}>
+                              <Pencil className="size-4" />
+                            </Button>
                             <Button variant="ghost" size="icon" onClick={() => del("machines", m.id)}>
                               <Trash2 className="size-4 text-destructive" />
                             </Button>
@@ -745,6 +806,57 @@ function SetupTab({ depts, mtypes, machines, reload }:
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpenTypeId(null)}>ยกเลิก</Button>
             <Button onClick={addMach}><Plus className="size-4 mr-1" /> เพิ่ม</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!editMt} onOpenChange={(o) => !o && setEditMt(null)}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>แก้ไขประเภทเครื่อง</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label>ชื่อประเภท</Label>
+              <Input value={editMtName} onChange={(e) => setEditMtName(e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <Label>สังกัดช่างที่รับผิดชอบ</Label>
+              <Select value={editMtDeptId} onValueChange={setEditMtDeptId}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">— ไม่ระบุสังกัดช่าง —</SelectItem>
+                  {depts.map((d) => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditMt(null)}>ยกเลิก</Button>
+            <Button onClick={saveEditMt}>บันทึก</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!editMach} onOpenChange={(o) => !o && setEditMach(null)}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>แก้ไขเครื่องจักร / อุปกรณ์</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label>ชื่อเครื่อง</Label>
+              <Input value={editMachName} onChange={(e) => setEditMachName(e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <Label>ประเภทเครื่อง</Label>
+              <Select value={editMachTypeId} onValueChange={setEditMachTypeId}>
+                <SelectTrigger><SelectValue placeholder="เลือกประเภทเครื่อง" /></SelectTrigger>
+                <SelectContent>
+                  {mtypes.map((t) => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditMach(null)}>ยกเลิก</Button>
+            <Button onClick={saveEditMach}>บันทึก</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -805,7 +917,7 @@ function AdminStats({ jobs, depts }: { jobs: Job[]; depts: Dept[] }) {
         <Select value={deptId} onValueChange={setDeptId}>
           <SelectTrigger className="w-48"><SelectValue /></SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">ทุกแผนก</SelectItem>
+            <SelectItem value="all">ทุกสังกัดช่าง</SelectItem>
             {depts.map((d) => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}
           </SelectContent>
         </Select>
@@ -820,7 +932,7 @@ function AdminStats({ jobs, depts }: { jobs: Job[]; depts: Dept[] }) {
       </div>
 
       <div className="card-soft p-5">
-        <h3 className="font-bold mb-3">แยกตามแผนก</h3>
+        <h3 className="font-bold mb-3">แยกตามสังกัดช่าง</h3>
         {byDept.length === 0 && <div className="text-sm text-muted-foreground">ไม่มีข้อมูลในช่วงที่เลือก</div>}
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {byDept.map(([k, list]) => {
@@ -841,70 +953,6 @@ function AdminStats({ jobs, depts }: { jobs: Job[]; depts: Dept[] }) {
             );
           })}
         </div>
-      </div>
-    </div>
-  );
-}
-
-type AuditRow = {
-  id: number; actor_name: string | null; action: string;
-  job_code: string | null; detail: Record<string, unknown> | null; created_at: string;
-};
-
-const AUDIT_ACTION_LABEL: Record<string, string> = {
-  "job.delete": "ลบงานซ่อม",
-  "job.assign": "มอบหมายงาน",
-  "job.reassign": "ย้ายงานให้ผู้ซ่อมคนใหม่",
-  "job.revert_to_pending": "ส่งงานกลับไม่มอบหมาย",
-};
-
-// Read-only -- RLS on audit_log restricts SELECT to the admin role_code
-// already (see 20260717000001_audit_log.sql), this tab is just a viewer.
-// Append-only by design: no edit/delete UI here, matching an audit log's
-// whole point.
-function AuditTab() {
-  const [rows, setRows] = useState<AuditRow[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    (async () => {
-      const { data } = await supabase
-        .from("audit_log")
-        .select("id, actor_name, action, job_code, detail, created_at")
-        .order("created_at", { ascending: false })
-        .limit(200);
-      setRows((data ?? []) as AuditRow[]);
-      setLoading(false);
-    })();
-  }, []);
-
-  return (
-    <div className="card-soft p-5">
-      <h2 className="font-bold mb-3">ประวัติการดำเนินการ (200 รายการล่าสุด)</h2>
-      {loading && <div className="text-sm text-muted-foreground">กำลังโหลด...</div>}
-      {!loading && rows.length === 0 && (
-        <div className="text-sm text-muted-foreground">ยังไม่มีประวัติการดำเนินการ</div>
-      )}
-      <div className="space-y-2">
-        {rows.map((r) => (
-          <div key={r.id} className="border rounded-lg p-3 text-sm">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="font-semibold">{AUDIT_ACTION_LABEL[r.action] ?? r.action}</span>
-              {r.job_code && <span className="font-mono text-brand text-xs">{r.job_code}</span>}
-              <span className="text-xs text-muted-foreground ml-auto">
-                {new Date(r.created_at).toLocaleString("th-TH")}
-              </span>
-            </div>
-            <div className="text-xs text-muted-foreground mt-1">
-              โดย: {r.actor_name ?? "ไม่ทราบผู้ดำเนินการ"}
-            </div>
-            {r.detail && (
-              <div className="text-xs text-muted-foreground mt-1 font-mono break-all">
-                {JSON.stringify(r.detail)}
-              </div>
-            )}
-          </div>
-        ))}
       </div>
     </div>
   );

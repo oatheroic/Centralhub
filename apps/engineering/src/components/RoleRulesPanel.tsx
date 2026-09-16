@@ -422,9 +422,9 @@ function DeptOverridesSection() {
   return (
     <Card className="p-6 space-y-4">
       <div>
-        <h2 className="text-lg font-bold">🧭 กำหนดแผนกรายบุคคล (ข้อยกเว้น)</h2>
+        <h2 className="text-lg font-bold">🧭 กำหนดสังกัดช่างรายบุคคล (ข้อยกเว้น)</h2>
         <p className="text-sm text-muted-foreground mt-1">
-          กำหนดแผนก/สังกัดในระบบนี้ให้ผู้ใช้เฉพาะราย — มีผลเหนือ "จับคู่แผนก CentralHub" ด้านล่างเสมอ
+          กำหนดว่าผู้ใช้เฉพาะรายอยู่ในความรับผิดชอบของสังกัดช่างใด — มีผลเหนือ "จับคู่แผนก → สังกัดช่าง" ด้านล่างเสมอ
           ใช้เมื่อแผนกของผู้ใช้ใน CentralHub ไม่มีคู่ที่ตรงกัน (ไม่มีค่าตั้งไว้ หรือสะกดไม่ตรง)
         </p>
       </div>
@@ -464,9 +464,9 @@ function DeptOverridesSection() {
           </Select>
         </div>
         <div>
-          <Label>แผนกในระบบนี้ *</Label>
+          <Label>สังกัดช่าง *</Label>
           <Select value={deptId} onValueChange={setDeptId}>
-            <SelectTrigger><SelectValue placeholder="เลือกแผนก" /></SelectTrigger>
+            <SelectTrigger><SelectValue placeholder="เลือก" /></SelectTrigger>
             <SelectContent>
               {depts.map((d) => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}
             </SelectContent>
@@ -529,18 +529,19 @@ function DeptAliasSection() {
   return (
     <Card className="p-6 space-y-4">
       <div>
-        <h2 className="text-lg font-bold">🏢 จับคู่แผนก CentralHub ↔ แผนกในระบบแจ้งซ่อม</h2>
+        <h2 className="text-lg font-bold">🏢 จับคู่แผนก → สังกัดช่างที่รับผิดชอบ</h2>
         <p className="text-sm text-muted-foreground mt-1">
-          ใช้กำหนดว่าค่า "แผนก" ของผู้ใช้ CentralHub แต่ละค่า สอดคล้องกับแผนก/สังกัดใดในระบบนี้
-          (ใช้สำหรับ "หัวหน้าสังกัด" ดูงานเฉพาะสังกัดของตน)
+          "แผนก" คือแผนกจริงของพนักงานตามข้อมูล CentralHub (เช่น Quality Control) — "สังกัดช่าง" คือหน่วยช่างในระบบนี้
+          (ช่างผลิต/ช่างบรรจุ/ช่างทั่วไป) ที่รับผิดชอบงานซ่อมของแผนกนั้น เช่น Quality Control → ช่างผลิต
+          หมายถึงงานแจ้งซ่อมจากแผนก QC จะถูกส่งให้หัวหน้าสังกัดช่างผลิต ไม่ได้แปลว่าพนักงาน QC ย้ายไปอยู่ช่างผลิต
         </p>
       </div>
       <div className="overflow-x-auto border rounded-lg">
         <table className="w-full text-sm">
           <thead className="bg-muted/50">
             <tr className="text-left">
-              <th className="p-2">แผนก CentralHub</th>
-              <th className="p-2">แผนกในระบบนี้</th>
+              <th className="p-2">แผนก (CentralHub)</th>
+              <th className="p-2">สังกัดช่างที่รับผิดชอบ</th>
               <th className="p-2 text-right">การดำเนินการ</th>
             </tr>
           </thead>
@@ -562,18 +563,18 @@ function DeptAliasSection() {
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end border-t pt-4">
         <div>
-          <Label>แผนก CentralHub *</Label>
+          <Label>แผนก (CentralHub) *</Label>
           <Select value={centralhubDept} onValueChange={setCentralhubDept}>
-            <SelectTrigger><SelectValue placeholder="เลือกแผนก" /></SelectTrigger>
+            <SelectTrigger><SelectValue placeholder="เลือก" /></SelectTrigger>
             <SelectContent>
               {attributeValues.department.map((v) => <SelectItem key={v} value={v}>{v}</SelectItem>)}
             </SelectContent>
           </Select>
         </div>
         <div>
-          <Label>แผนกในระบบนี้ *</Label>
+          <Label>สังกัดช่าง *</Label>
           <Select value={deptId} onValueChange={setDeptId}>
-            <SelectTrigger><SelectValue placeholder="เลือกแผนก" /></SelectTrigger>
+            <SelectTrigger><SelectValue placeholder="เลือก" /></SelectTrigger>
             <SelectContent>
               {depts.map((d) => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}
             </SelectContent>
@@ -642,7 +643,7 @@ function DiagnosticsSection() {
   const alias = !override && deptName ? aliases.find((a) => a.centralhub_department === deptName) : undefined;
   const resolvedDeptId = override?.department_id ?? alias?.department_id ?? null;
   const resolvedDeptName = resolvedDeptId ? depts.find((d) => d.id === resolvedDeptId)?.name ?? null : null;
-  const source = override ? "ข้อยกเว้นรายบุคคล" : alias ? "จับคู่แผนก (ทั่วไป)" : "ไม่พบ";
+  const source = override ? "ข้อยกเว้นรายบุคคล" : alias ? "จับคู่แผนก → สังกัดช่าง (ทั่วไป)" : "ไม่พบ";
   const needsDept = roleCode === "leader" || roleCode === "department_head";
   const broken = needsDept && !resolvedDeptId;
 
@@ -651,7 +652,7 @@ function DiagnosticsSection() {
       <div>
         <h2 className="text-lg font-bold">🔍 ตรวจสอบสิทธิ์ที่แปลผลแล้ว (การวินิจฉัย)</h2>
         <p className="text-sm text-muted-foreground mt-1">
-          ตรวจสอบว่าผู้ใช้รายหนึ่งจะได้รับบทบาทและแผนกใดจริง ๆ — ช่วยพบข้อผิดพลาดก่อนหน้าจอ "หัวหน้าสังกัด" ว่างเปล่า
+          ตรวจสอบว่าผู้ใช้รายหนึ่งจะได้รับบทบาทใด และอยู่ในความรับผิดชอบของสังกัดช่างใดจริง ๆ — ช่วยพบข้อผิดพลาดก่อนหน้าจอ "หัวหน้าสังกัด" ว่างเปล่า
         </p>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
@@ -671,13 +672,13 @@ function DiagnosticsSection() {
       {checked && (
         <div className="border rounded-lg p-4 text-sm space-y-1">
           <div>บทบาทที่แปลผล (role_code): <b>{roleCode ?? "(ไม่พบ)"}</b></div>
-          <div>แผนก CentralHub (dept_name จาก token): <b>{deptName ?? "(ไม่มีค่า)"}</b></div>
-          <div>แหล่งที่มาของแผนกที่แปลผล: <b>{source}</b></div>
-          <div>แผนกในระบบนี้ที่แปลผลได้: <b>{resolvedDeptName ?? "(ไม่พบ)"}</b></div>
+          <div>แผนก (CentralHub, dept_name จาก token): <b>{deptName ?? "(ไม่มีค่า)"}</b></div>
+          <div>แหล่งที่มาของสังกัดช่างที่แปลผล: <b>{source}</b></div>
+          <div>สังกัดช่างที่รับผิดชอบ: <b>{resolvedDeptName ?? "(ไม่พบ)"}</b></div>
           {broken && (
             <div className="text-destructive font-semibold pt-2">
-              ⚠️ บทบาทนี้ต้องมีแผนก แต่แปลผลแผนกไม่สำเร็จ — หน้าหัวหน้าสังกัดของผู้ใช้รายนี้จะว่างเปล่า
-              กรุณาตั้ง "กำหนดแผนกรายบุคคล" หรือ "จับคู่แผนก CentralHub" ด้านบน
+              ⚠️ บทบาทนี้ต้องมีสังกัดช่าง แต่แปลผลไม่สำเร็จ — หน้าหัวหน้าสังกัดของผู้ใช้รายนี้จะว่างเปล่า
+              กรุณาตั้ง "กำหนดสังกัดช่างรายบุคคล" หรือ "จับคู่แผนก → สังกัดช่าง" ด้านบน
             </div>
           )}
         </div>

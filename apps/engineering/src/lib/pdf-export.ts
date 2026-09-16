@@ -58,7 +58,7 @@ export function exportJobAsPdf(job: PrintableJob) {
   <div class="sub">${esc(job.title)} · สถานะ: ${esc(STATUS_LABEL[job.status] ?? job.status)}</div>
   <table>
     ${row("ผู้แจ้ง", job.reporter_name ?? "-")}
-    ${row("แผนก", job.department_name ?? "-")}
+    ${row("สังกัดช่าง", job.department_name ?? "-")}
     ${row("ประเภทเครื่อง", job.machine_type_name ?? "-")}
     ${row("เครื่องจักร", job.machine_name ?? "-")}
     ${row("ผู้ซ่อม", job.assignee_name ?? "-")}

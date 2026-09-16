@@ -21,4 +21,16 @@ export const STATUS_LABEL: Record<string, string> = {
   external: "ส่งซ่อมภายนอก",
   awaiting_review: "รอตรวจรับ",
   completed: "เสร็จสิ้น",
+  cancelled: "ยกเลิกอัตโนมัติ",
 };
+
+export const SCHEDULE_MODE_LABEL: Record<string, string> = {
+  date: "กำหนดวันที่",
+  within_10_days: "แจ้งภายใน 10 วัน",
+};
+
+export function thaiDate(iso: string | null | undefined): string {
+  if (!iso) return "-";
+  const d = new Date(iso);
+  return d.toLocaleDateString("th-TH", { day: "numeric", month: "short", year: "numeric" });
+}

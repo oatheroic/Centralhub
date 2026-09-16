@@ -1007,6 +1007,31 @@ first- vs. third-party by fiat**.
     hosted project or the `supabase` CLI anymore, so keeping either the
     file or the old directory name would mislead a future reader into
     thinking they still do something here.
+- **Vocabulary — "department" means two different things here, and the
+  distinction was only made explicit in the 2026-09-15 update pass (§10d)
+  after live use showed the reporter form displaying the wrong one**:
+  - **Department (แผนก)** — where an employee actually works: CentralHub's
+    `user_attributes.department` ("Quality Control", "Purchasing"…).
+    Platform-owned; reaches this app only as the minted JWT's `dept_name`
+    claim, never stored in a table here. Shown to the user as their แผนก.
+  - **Repair group (สังกัดช่าง)** — an engineering sub-group that takes
+    repair jobs: ช่างผลิต / ช่างบรรจุ / ช่างทั่วไป. This is what this app's
+    `departments` table actually holds (the upstream table name is kept so
+    future Lovable exports still 3-way-merge), and what every
+    `department_id` FK here points at — `profiles`, `repair_jobs`,
+    `parts_requisitions`, `machines.repair_department_id`,
+    `machine_types.department_id`. `current_dept()` returns a repair group.
+  - **Routing** — `department_aliases` (bulk: "this department's jobs go
+    to this repair group") and `department_user_overrides` (per user) map
+    the first onto the second; `profiles.department_id` caches the result.
+    "Quality Control → ช่างผลิต" means the ช่างผลิต crew is responsible
+    for QC's machines — not that a QC employee is "in" ช่างผลิต.
+  - The UI now uses แผนก strictly for the first and สังกัด/สังกัดช่าง for
+    the second (the export already said "หัวหน้าสังกัด"/"สังกัดผู้ซ่อม" for
+    the group; ingestion-era labels that said "แผนกในระบบนี้" were
+    corrected). In code, `useAuth`'s `Profile` carries `department` (the
+    real one, display only) and `department_id`/`repair_group_name`. The
+    same block lives at the top of `db/migrations/20260716000000_schema.sql`.
 - **Role & department mapping — deliberately still zero changes to
   CentralHub's own `user_attributes` shape or admin UI**:
   - **General case**: this app's own admin panel (`RoleRulesPanel.tsx`,
@@ -1129,7 +1154,9 @@ first- vs. third-party by fiat**.
     showed up as e.g. `a1b2c3d4` in the UI. Fixed by adding a `name` claim
     to the minted JWT (`dataToken.ts`, sourced from the existing CentralHub
     session — nothing new to look up) and having `ensure_profile()` read
-    and refresh it every call.
+    and refresh it every call. (The short code itself survived as
+    `profiles.code` until §10g replaced it with the Keycloak username via
+    a `username` claim on the same JWT.)
   - **Nav inconsistency**: `AppHeader.tsx` originally put the "← Central
     Hub" link on the right; every other app's chrome (`packages/ui`'s
     `AppShell`, `AssetsNav.tsx`) puts it leftmost. Restructured to match.
@@ -1481,6 +1508,15 @@ whole section exists for):
      needs to be a real, hand-written, reviewed data migration — never a
      blind append. Test it against a copy of the live volume before
      applying it to the real one.
+   - **Data arriving with the update** (table exports, CSVs): apply the same
+     test to it as to schema — it's *additive* only if every FK it carries
+     can be resolved on this side (every person-referencing uid has a
+     Keycloak sub, every foreign vocabulary has a mapping); otherwise it's
+     *structural* (an identity-model gap) and the answer is to archive it
+     with the snapshot, list the prerequisites in §13, and import once,
+     cleanly, later — never to import around the gap with NULLed FKs and
+     "legacy name" columns. See the first-run notes below for the case
+     that produced this rule.
    - **Structural** (the update changes the auth model, the role model, or
      anything §10c's minted-JWT/RLS rewrite already touched — e.g. the
      export adds real Supabase Auth where there was none before, the same
@@ -1491,20 +1527,49 @@ whole section exists for):
      already been adapted" stops being a real constraint, same reasoning
      §10c's guiding principle already applies to a first-time ingestion.
 
-**3. Frontend**: re-apply §10c step 7's conversions to just the changed
-files — strip any SSR/framework-specific scaffolding the new files bring
-back in, repoint `supabase-js` calls at the app's existing self-hosted
-PostgREST/storage-api client (already configured, nothing new to set up),
-wire any new mutating action through the existing `useGuardedAction`/
-data-token pattern. This is manual cherry-picking scoped to the diff, not a
-mechanical merge — the same category of work §10c step 7 does for a whole
-app, just smaller.
+**3. Frontend** — sort every changed file into one of three buckets
+*before* touching it, then merge, then verify:
+   - **Bucket the diff.** *Feature* files (merge them); *platform noise*
+     (ignore outright — Lovable preview-iframe auth, framework/bundler
+     config bumps, generated route trees, formatting-only churn in
+     generated types); *retired-at-ingestion* (a server function, a SaaS
+     connector, an auth hook this ingestion replaced — ignore the file,
+     **but check whether the same data or behaviour now needs to land
+     somewhere else**: `apps/engineering`'s retired `public-history`
+     server function grew new fields that had to be added to the PostgREST
+     query that replaced it). The third bucket is the one that's easy to
+     skip wrongly.
+   - **3-way merge first, cherry-pick second.** Per feature file:
+     `git merge-file -p --diff3 <ours> <archive/<baseline>/path> <new export path>`.
+     Because the archived snapshot is exactly what the ingested file was
+     derived from, git separates "what upstream changed" from "what
+     ingestion changed" mechanically — on the first real run this resolved
+     3 of 8 files with zero conflicts (including a 900-line page that had
+     diverged by 650 lines), and every remaining conflict was the same
+     shape: *ingestion deleted this* (a route export, a SaaS call, an auth
+     wrapper) *vs. upstream edited next to it* — resolve by keeping ours
+     and taking their addition. Hand-cherry-pick only what ingestion
+     restructured outright (a replaced data loader, a rewritten page). A
+     file ingestion never touched (`types.ts`, most `components/ui/*`) is
+     simply replaced with the new export's copy.
+   - Then the usual conversions on whatever landed: strip any SSR/
+     framework scaffolding the new files bring back in, repoint
+     `supabase-js` calls at the existing self-hosted client, wire new
+     mutating actions through the existing data-token pattern.
 
 **4. Schema**: add a **new** migration file,
 `apps/<app>/db/migrations/<YYYYMMDD>_<feature>.sql`, written idempotently
 (`ADD COLUMN IF NOT EXISTS`, `CREATE TABLE IF NOT EXISTS`) in the same style
 as the existing files — don't regenerate or edit the existing migration
-files in place. `migrate.sh` already re-applies every file on every
+files' *statements* in place (editing their **comments** is fine and
+encouraged: a vocabulary or gotcha block belongs at the top of the schema
+file where the next reader looks, not only in a later file). **Keep the
+upstream table/column names even when they turn out to be misleading** —
+`apps/engineering`'s `departments` really holds repair groups — and fix
+the meaning in labels, comments and TS types instead: the schema name is
+what the *next* update's 3-way merge and migration diff key on, so a
+rename would turn every future upstream migration into a manual port.
+`migrate.sh` already re-applies every file on every
 container start with no "already migrated" guard (§10c step 5), so a purely
 additive new file is picked up automatically and safely, without touching
 files that already match the live schema. This is the payoff of §10c's
@@ -1531,6 +1596,21 @@ extend `scripts/test-stack.mjs`'s assertions for the app (§10c step 8) to
 cover the new surface, then bring the stack up against the **existing**
 data volume (not a fresh one) and confirm the new migration applies cleanly
 and the app still works end-to-end for data that predates the update.
+Then **live-test every role's screens, not just the new surface** — the
+test script proves the schema and RLS; it does not walk the old screens
+the way a user does. On the first real run every real bug found this way
+(a field blank since ingestion, a sub fragment shown as a user id, a stale
+cache the admin panel couldn't see, a reject reason silently overwritten,
+raw `prompt()` dialogs) was **pre-existing** and only became visible
+because testing the new feature walked through the surrounding old ones.
+Budget for that: expect to fix ingestion-era issues in the same pass,
+record them under a separate "post-update hardening" section (§10g is the
+model) clearly marked pre-existing, so the next reader doesn't attribute
+them to the upstream change — and add a read-only `test-stack.mjs`
+assertion for each fix, since the script is also what leaves test state
+behind between runs (§10g's stale-cache bug was the script's own doing).
+Seed the test cast (one dev account per role, routed to one group) in code
+so the next pass doesn't rebuild it by hand — see §10g's "test cast".
 
 **8. Re-archive.** Add a new dated snapshot,
 `apps/<app>/archive/<YYYYMMDD>-update/`, of the export version just
@@ -1538,6 +1618,214 @@ integrated, stripped the same way §10c step 10 strips a baseline, and
 update that app's `archive/README.md` index. This becomes the reference
 point for the *next* update's diff — skipping it silently breaks step 1 for
 whoever does the next update.
+
+**First real run of this section — `apps/engineering`, 2026-09-15** (the
+steps above were written before any update had actually arrived; this is
+what one looked like in practice, and what it added to the playbook):
+
+- **What came in**: a re-export of the same Lovable project two months
+  after ingestion, plus the hosted instance's table data as CSVs. Step 1's
+  diff against `archive/20260716-baseline/` was tightly scoped — 15
+  modified files, 3 new source files, 1 new migration — and step 2
+  classified it **additive** with no hesitation: one real feature (repair
+  scheduling — reporter picks a fixed date or "within 10 days", leader
+  can't assign an undated job, a `SECURITY DEFINER`
+  `expire_pending_schedules()` auto-cancels overdue ones, repairer flags
+  `parts_ready`), a layer of UI polish that depends on it (status chips,
+  admin edit dialogs for machine types/machines, per-repairer monthly
+  summary, a spreadsheet-style history table with one row per part used,
+  a multi-select status filter, leader's manual requisition entry
+  removed in favour of the repairer-driven flow), and a bucket of
+  Lovable-platform noise to ignore outright (`previewAuthStorage.ts`
+  iframe-auth brokering, a `useAuth` `onAuthStateChange` tweak,
+  Sheets-sync changes for a feature this ingestion dropped, a
+  `@lovable.dev/vite-tanstack-config` bump). Nothing touched auth, roles,
+  or RLS. Re-ingesting would have thrown away the whole §10b rewrite to
+  absorb ~800 additive lines.
+- **Technique worth adding to step 3 — 3-way merge with the baseline as
+  the common ancestor, before any hand cherry-picking**:
+  `git merge-file -p --diff3 <ours> <archive/baseline file> <new export file>`
+  per changed file. Because the archived snapshot is *exactly* what the
+  ingested file was derived from, git can separate "what Lovable changed"
+  from "what ingestion changed" mechanically. Result on this update:
+  `JobDetailDialog`/`JobFilters`/**`AdminPage`** merged with **zero
+  conflicts** (`AdminPage` had diverged by 651 lines from the baseline —
+  the ingestion rewrote its user-management half, Lovable changed its
+  machine-catalog half, and diff3 kept both without help); the rest had
+  1–6 small conflicts each, every one of which was "ingestion deleted this
+  (RequireRole wrapper, `syncSheet` call, TanStack route export) vs.
+  Lovable edited next to it" — trivial to resolve by keeping ours and
+  taking their addition. Only `HistoryPage` needed real hand-work, because
+  ingestion had replaced its data loader (a service-role server function
+  → a plain PostgREST query) and the new columns had to be added to *our*
+  query rather than merged in. Manual cherry-picking as step 3 originally
+  described would have been slower and more error-prone for every file
+  but that one. `src/integrations/supabase/types.ts` was byte-identical
+  to the baseline (ingestion never regenerated it), so it was simply
+  replaced with the new export's copy.
+- **Step 4/5 as written held**: one new idempotent file
+  (`20260915000000_repair_scheduling.sql`), five nullable/defaulted
+  columns + one function, no new RLS (the existing "update jobs by role"
+  policy already lets a reporter set their own job's date; the function is
+  `SECURITY DEFINER` with a WHERE narrow enough that caller scope is
+  irrelevant). The one deliberate deviation from upstream: the function's
+  `EXECUTE` grant goes to `engineering_authenticated` only, not `anon` —
+  nothing here runs unauthenticated. `migrate.sh` picked it up on the
+  existing volume with the 7 pre-existing jobs intact; the new
+  `test-stack.mjs` assertions read `parts_ready=false`/NULL scheduling
+  fields off a pre-update row directly.
+- **"Update arrives with data" is a case the section above didn't
+  anticipate, and the right answer was to hold it.** The assumption in
+  "why this is a merge problem, not a resync problem" — that the hosted
+  project was never used after ingestion — turned out false here: the
+  original Lovable instance kept being *used in production* (479 jobs,
+  206 requisitions, 41 users) while the ingested copy only ever held dev
+  seed. So the CSVs weren't a resync, they were the app's real history
+  arriving for the first time. Two things made importing them now the
+  wrong move, both identity-shaped rather than schema-shaped: every
+  person-referencing column holds a hosted Supabase Auth uid with no
+  Keycloak counterpart yet (`profiles.id`, `repair_jobs.reporter_id`/
+  `assigned_to`, `parts_requisitions.repairer_id`/`created_by`), and the
+  hosted `departments` table mixes this app's own repair sub-groups
+  (ช่างผลิต/ช่างบรรจุ/ช่างทั่วไป, already seeded locally) with company
+  departments (บรรจุ, ผลิต, HR, RD…) that CentralHub's platform
+  `attribute_values` list is meant to own. A partial import (NULLed FKs,
+  `*_name_legacy` text columns for display) was designed and rejected —
+  it would have baked the mapping gap into the schema permanently. The
+  data is archived alongside the code snapshot instead
+  (`archive/20260915-update/data/`), and §13 lists the exact
+  prerequisites for the one-shot import. **General rule for step 2**:
+  treat data the same way as schema — an import whose FKs can all be
+  resolved is additive; one that can't is *structural* (identity model),
+  and the fix is to establish the mapping first, not to import around it.
+- **The patch verifiably works without any of that data** — the feature
+  only touches `repair_jobs`, and the UI polish reads whatever
+  machines/departments exist. Confirmed against the dev seed.
+- **Coverage check at the end**: every one of the update's 19 changed
+  files was accounted for — merged, replaced, or ignored with a stated
+  reason (see §10g's table). Nothing was left out for incompatibility; the
+  one pre-existing gap the update brushes against (Realtime job alerts,
+  §13) is unchanged on both sides. The live-test pass that followed is
+  written up as §10g, kept separate so this section stays a playbook.
+
+---
+
+## 10g. Post-update hardening (`apps/engineering`, 2026-09-15/16)
+
+Everything the live-test pass after the §10d update changed **beyond** what
+Lovable shipped. None of it came from the upstream diff; all of it was
+pre-existing ingestion-era behaviour that only became visible by walking
+the old screens while testing the new feature. Kept apart from §10d so
+that section remains the playbook and this is the changelog.
+
+**Coverage of the upstream update, for the record** (19 files):
+
+| Upstream change | Outcome |
+|---|---|
+| Migration: 5 scheduling columns + `expire_pending_schedules()` | Merged — `EXECUTE` granted to `engineering_authenticated` only, not `anon` |
+| Reporter: schedule mode/date picker, `SetRepairDateDialog`, resubmit-after-cancel | Merged, live-tested |
+| Leader: assign blocked while awaiting schedule, machine code/description on cards, monthly per-repairer summary | Merged, live-tested |
+| Repairer: parts-ready toggle, re-edit while awaiting review, part-row completeness check, monthly status pie | Merged, live-tested |
+| `JobStatusChips`, `JobDetailDialog` scheduling rows, `JobFilters` multi-select status | Merged |
+| `PartsRequisitionTab`: leader's manual entry form and row delete removed | Merged as-is (accepted) |
+| Admin: machine-type search, edit dialogs for types/machines | Merged, live-tested |
+| History: spreadsheet table, one row per part | Merged, live-tested (+ container widened, see below) |
+| `types.ts` regeneration | Replaced wholesale (ingestion had never regenerated it) |
+| `useAuth` `onAuthStateChange` tweak | Ignored — no Supabase Auth events exist here; the loading flash it fixed can't occur |
+| `previewAuthStorage.ts`, `client.ts` | Ignored — Lovable preview-iframe auth brokering |
+| `sheets.functions.ts`, `public-history.functions.ts` | Ignored as files (retired at ingestion); the latter's new fields ported into `HistoryPage`'s PostgREST query |
+| `@lovable.dev/vite-tanstack-config` bump | Ignored — TanStack Start was dropped at ingestion |
+
+**Fixes and additions from the live-test pass** (migrations
+`20260915000001`–`04`, all idempotent, all applied to the existing volume):
+
+- The read-only แผนก field had been blank since ingestion: `useAuth` read
+  a `department_name` off `ensure_profile()`'s return value that never
+  existed (the export got it from a `profiles → departments` join the RPC
+  replaced). Fixing it exposed the deeper issue: the value it *would* have
+  shown was the repair group, not the employee's department — see the
+  vocabulary block in §10b. The form now shows both, labelled แผนก (from
+  the `dept_name` claim) and สังกัดช่างที่รับผิดชอบ, and every label
+  across the app that called a repair group "แผนก" was corrected.
+- The reporter-name default vanished after each submit (upstream bug too:
+  the seeding effect only fires when `full_name` changes; `resetForm()`
+  blanked it). Now resets to `profile.full_name`.
+- "รหัสผู้ใช้งาน" showed the sub-derived 8-hex short code — meaningless
+  to a user. auth-gateway now carries Keycloak's `preferred_username`
+  through the session (`oidc.ts` → `callback.ts` → `session.ts`,
+  optional on tokens minted before the deploy) into a `username` claim
+  on the minted JWT (`dataToken.ts`); `20260915000001_profile_username.sql`
+  redefines `ensure_profile()` to store it as `profiles.code`,
+  refreshed every login, falling back to the short code only for a
+  pre-deploy session. Labelled ผู้ใช้งาน now. When the hosted data is
+  eventually imported (§13), the real employee codes from `profiles.csv`
+  are a candidate for this column instead — decide then.
+- **Leader's assign dropdown missed a repairer whose group an admin had
+  just changed** — a real pre-existing bug, surfaced because the test
+  cast was set up via overrides. `profiles.department_id` (the cached
+  repair group) is refreshed only by `ensure_profile()`, i.e. only when
+  *that user* loads a page; `LeaderPage`'s roster filters *other* users'
+  cached values, so an admin moving a repairer into a leader's group had
+  no visible effect until the repairer next logged in — and the
+  diagnostics panel looked fine, because `current_dept()` reads the
+  override live. (`test-stack.mjs` had been leaving exactly this stale
+  state behind on every run: it flips dev-user's override, triggers
+  `ensure_profile()`, restores the override, never re-triggers.)
+  Fixed at the source: `20260915000002_group_override_sync.sql` adds an
+  AFTER INSERT/UPDATE trigger on `department_user_overrides` that writes
+  the cache directly (an override is authoritative, so the cached value
+  is exactly known). DELETE is deliberately not handled — the fallback
+  resolution needs the user's own `dept_name` claim, unknowable from the
+  admin's request; the cache self-heals on that user's next load. The
+  test now asserts the restore write re-synced the cache.
+- **Leader actions gated by status.** Ingestion had added reassign and
+  revert-to-pending on the leader's active list without considering
+  `awaiting_review`: reverting a finished job left a `pending_assign` row
+  carrying stale close-out data and requisitions pointing at the old
+  repairer. Now: in_progress / waiting_parts / external → reassign (all
+  state travels with the job; only `assigned_to` is repairer-specific
+  before close-out) or revert (also clears `parts_ready`); awaiting_review
+  → neither, only a new **leader reject** (same `in_progress` +
+  `reject_reason` transition the reporter's reject makes, audited as
+  `job.leader_reject`), after which the other two unlock.
+- **`RejectJobDialog`** (`components/RejectJobDialog.tsx`) replaces the
+  export's raw `window.prompt()` on both reject paths — a required reason
+  (the prompt accepted ""), a description of what will happen, themeable.
+- **Rejection history kept.** `repair_jobs.reject_reason` is a single
+  column, so a second rejection overwrote the first. Each rejection now
+  also appends to `job_history` — the table the export defined and never
+  wrote to — with a new `kind = 'reject'` discriminator
+  (`20260915000003_job_history_kind.sql`, `lib/jobHistory.ts`); the detail
+  dialog shows "ประวัติการปฏิเสธงาน (N ครั้ง)" newest-first with actor and
+  time. `reject_reason` stays as "latest" and drives a new red
+  **ถูกปฏิเสธ** chip in `JobStatusChips` (shown while the job is back in
+  in_progress / waiting_parts / external), so a repairer sees it in the
+  list without opening details.
+- **Audit log redesigned** (`components/AuditLogPanel.tsx`, extracted from
+  `AdminPage`): a real table (date/time · colour-coded action pill · job
+  code · human-sentence detail · actor) instead of cards with raw JSON;
+  filters for text, action, actor and date range; tab renamed
+  บันทึกการดำเนินการ. On naming, since the app now has four "histories":
+  the **History page** is a spreadsheet of jobs; the leader's **ประวัติ**
+  tab is their group's jobs; **ประวัติการปฏิเสธงาน** inside a job's detail
+  is that job's rejections; the admin tab is the **audit log** (who did
+  what).
+- **History page widened** to full viewport width — it inherited the
+  export's `max-w-5xl` (1024px) container while the new table needs
+  1200px, so it always scrolled horizontally regardless of screen size.
+- **Test cast seeded in code**, so a fresh stack has one account per role
+  routed to one repair group without hand-configuring the admin panel:
+  auth-gateway's `seedDevAttributes()` sets dev-user4 (Finance/Staff/
+  Senior) and dev-user5 (Operations/Staff/Mid) attributes if unset and
+  adds `reporter`/`leader` overrides for them if the app has none;
+  `20260915000004_dev_seed_aliases.sql` seeds the department → repair
+  group routing (Purchasing/Finance/Operations → ช่างผลิต, Executive →
+  ช่างทั่วไป) if the alias table is empty. Both guards mean an admin's
+  later edits are never resurrected by a restart. The resulting cast:
+  **dev-user4** reporter, **dev-user5** leader, **dev-user** repairer
+  (Staff/Junior rule), **dev-admin** admin — reporter files on an Oven
+  machine, leader assigns to Dev User. Verified in a rolled-back
+  transaction against the live DB; not yet against a fresh volume (§13).
 
 ---
 
@@ -1768,7 +2056,7 @@ whoever does the next update.
 | `apps/finance` | `@apps/finance` | `/apps/finance/` | Placeholder department app; demo RBAC-guarded "Approve budget" action. |
 | `apps/admin` | `@apps/admin` | `/apps/admin/` | Keycloak user list (with a per-user "Revoke session" action, §8, now confirm-gated, §9) + permissions matrix editor (§7). Linked from `central-hub`'s landing grid only for users holding the `admin` role (§9) — that's a discoverability nicety, not the real protection: the `admin`-role Nginx gate is what actually stops access. |
 | `apps/assets` | `@apps/assets` | `/apps/assets/` | First third-party/self-hosted app (§10) — asset purchase requests, registration, transfers; its own Postgres/PostgREST/storage-api, no external SaaS dependency. |
-| `apps/engineering` | `@apps/engineering` | `/apps/engineering/` | Second third-party/self-hosted app (§10b) — machine repair job workflow (report/assign/repair/review); its own Postgres/PostgREST/storage-api, no external SaaS dependency. |
+| `apps/engineering` | `@apps/engineering` | `/apps/engineering/` | Second third-party/self-hosted app (§10b) — machine repair job workflow (report/schedule/assign/repair/review); its own Postgres/PostgREST/storage-api, no external SaaS dependency. First app to receive a post-ingestion Lovable update (§10d, 2026-09-15). |
 | `apps/resource-booking` | `@apps/resource-booking` | `/apps/resource-booking/` | First-party app (§10e) — room booking; the first app in this repo with a real mutating backend (`services/booking-api`, compose `api-resource-booking`), using the native permission gate (§7) via `@centralhub/service-kit` (§10f) instead of minted-JWT/RLS. Admin-override cancels notify the owner. |
 
 This table itself is still maintained by hand (it's prose, not the registry) —
@@ -1909,6 +2197,7 @@ specific to `apps/engineering` (§10b), then everything else.
 
 | Item | Where it would live | Why deferred |
 |---|---|---|
+| **Import the hosted instance's real data** (`archive/20260915-update/data/*.csv` — 479 `repair_jobs`, 206 `parts_requisitions`, 399 `machines`, 76 `machine_types`, 41 `profiles`/`user_roles`, 12 `departments`) into `engineering-db` | A one-shot, idempotent (`ON CONFLICT (id) DO UPDATE`) import script under `apps/engineering/db/` — **not** a migration file (migrations re-run on every start; a data load must not) | Held deliberately (§10d's first-run notes): importing now would mean NULLed FKs and throwaway legacy-name columns. **Prerequisites — check every one before attempting the import**: (1) a Keycloak user for each of the 41 `profiles.csv` rows (its `code` column, e.g. `PK36`/`EN22`, is the employee code; `full_name` the display name), so `ensure_profile()` can provision them; (2) a complete `profiles.id` (hosted Supabase uid) → Keycloak `sub` mapping file covering every uid referenced anywhere in `repair_jobs.reporter_id`/`assigned_to`/`assigned_by`, `parts_requisitions.repairer_id`/`created_by`, and `user_roles.user_id` — the import rewrites every uid through it and must refuse to run on an unmapped one; (3) a decision on the 9 *company* departments the hosted `departments` table carries (บรรจุ, ผลิต, สโตร์, คลังสินค้า, คิวซี, HR, RD, CN, วิศวกรรม — referenced only by `machine_types.department_id`): either the general-table item below (adopt CentralHub's `attribute_values` list directly) lands first, or they're mapped to it explicitly; the 3 repair sub-groups (`machines.repair_department_id`, `parts_requisitions.department_id`, `repair_jobs.department_id`) map by name onto the rows already seeded locally; (4) `user_roles.csv` translated into `app_role_overrides`/`app_role_rules` rows via the existing generic endpoints (no `user_roles` table exists post-ingestion — role is JWT-resolved); (5) the `repair-images` storage bucket contents, if job/completion photos matter — only the URLs are in the CSVs, the objects were never exported; (6) the local dev seed (3 depts, 2 types, 4 machines, 7 jobs) replaced, not merged — `test-stack.mjs`'s engineering section borrows a `pending_assign` job and expects ≥2 departments, so re-run it after. CSV quirks are recorded in `archive/README.md` (semicolon-delimited, literal tabs inside `part_code`, empty string = NULL, three dropped `profiles` columns to skip); `repair_jobs.csv` already carries the scheduling columns this update added. |
 | Google Sheets sync | `apps/engineering` (originally `sheets.functions.ts`) | Dropped, not re-homed — keeping it (even against a direct Google API) would retain an external SaaS dependency, exactly what this ingestion pattern exists to remove (§10b) |
 | Realtime job-alert popups/sounds | `apps/engineering/src/hooks/useJobAlerts.ts` | Needs a self-hosted Supabase Realtime service, which this ingestion's compose additions (engineering-db/postgrest-engineering/storage-engineering) don't include — a real infra addition of its own. The hook is left in place (harmless — fails to connect, doesn't crash the page) rather than removed |
 | `department_head` role has no dedicated page | `apps/engineering/src/App.tsx` | The original export never built one either (only admin/leader/repairer/reporter have pages) — shows a "no screen yet" message rather than inventing a UI with no reference to carry over |
@@ -1916,7 +2205,6 @@ specific to `apps/engineering` (§10b), then everything else.
 | Users tab's live-session/attribute view requires the CentralHub Keycloak admin realm role, not this app's resolved `role_code` | `apps/engineering/src/pages/AdminPage.tsx` (`UsersTab`) | It calls the existing `/auth/admin/users(/attributes)` bulk endpoints, which are gated by `requireAdmin` (Keycloak realm role) — coincides with engineering's own `admin` role_code today only because `CENTRALHUB_ADMIN_ROLE_CODE` makes every CentralHub admin resolve to it. A user who reached engineering's `admin` role_code purely via a rule/override (without the Keycloak realm role) would get 403s from this tab specifically, while every other admin-gated engineering feature would still work for them. Not fixed this pass — noted in code and here rather than silently left unknown |
 | `resolveLocalRole()` badge doesn't account for `CENTRALHUB_ADMIN_ROLE_CODE` | `apps/engineering/src/pages/AdminPage.tsx` (`UsersTab`) | Client-side, display-only computation reusing existing endpoints (deliberately kept simple, no new backend route — see §10b); can show a stale/absent role badge for a CentralHub admin whose actual `role_code` comes from the guarantee rather than a rule/override row. Cosmetic only — `resolveRoleCode()` server-side already resolves correctly regardless |
 | A user can only be assigned ONE department (`department_user_overrides.user_sub` is `UNIQUE`) | `apps/engineering/db/migrations/20260717000000_dept_user_overrides.sql`, `current_dept()` | Found live while testing multi-department leader scenarios: some real leaders are in charge of more than one of this app's department sub-groups (e.g. both ช่างผลิต and ช่างบรรจุ), but `current_dept()` returns a single `uuid`, `profiles.department_id` is a single FK, and every department-scoped RLS policy (`repair_jobs`, `parts_requisitions`) compares against that one value. Supporting this is a real, non-trivial change — `current_dept()` would need to become a set-returning function or every department-scoped policy would need an `IN`/`ANY` comparison against a multi-row per-user department list, and `LeaderPage.tsx`'s "my department's jobs" query would need to union across all of a leader's departments instead of `.eq()` on one. Not started |
-| Parts-requisition delete (`PartsRequisitionTab.tsx`) still uses a raw `confirm()` and isn't audited | `apps/engineering/src/components/PartsRequisitionTab.tsx` | Same class of gap the job-delete/assign audit work (§10b, this session) closed for `repair_jobs` — noticed while touching this file to remove the vestigial `(code)` display, but left alone to keep that session's scope to what was actually asked (job deletion/assignment, not every delete button in the app) |
 
 **General**:
 
@@ -1963,6 +2251,12 @@ pnpm stack:up
 # Marketing, a friendly "Access denied" page on Finance and Admin, and a
 # window.alert() if you try an action beyond your granted verbs
 
+# to walk the engineering repair workflow end to end (§10g's seeded test
+# cast, one browser profile per user): dev-user4 / devuser4123 files a
+# job (reporter), dev-user5 / devuser5123 assigns it (leader),
+# dev-user / devuser123 works and closes it (repairer), dev-user4 reviews
+# it; dev-admin sees the audit log and the role/routing panel
+
 # to see instant revocation (§8): while dev-user has an active session in
 # another browser/tab, click "Revoke session" next to them in
 # /apps/admin/'s user list as dev-admin — their very next request anywhere
@@ -1992,8 +2286,13 @@ pnpm stack:up
   `CENTRALHUB_ADMIN_ROLE_CODE` guarantee, dev-user → `repairer` via the
   seeded attribute rule), a real RLS boundary on `repair_jobs` (a
   `repairer`-role INSERT attempt gets `403`, not a silent accept), the
-  `ensure_profile()` RPC (confirms a real `full_name` and a freshly-refreshed
-  `last_seen_at`, not just a 200), and the self-lockout / CentralHub-admin
+  `ensure_profile()` RPC (confirms a real `full_name`, `code` equal to the
+  Keycloak username, and a freshly-refreshed `last_seen_at`, not just a
+  200), the §10d repair-scheduling update (new columns readable on a
+  pre-update row, `expire_pending_schedules()` cancels an overdue job and
+  leaves `status` untouched, the borrowed job restored afterward), the
+  §10g override→cache sync trigger and `job_history.kind` column, and the
+  self-lockout / CentralHub-admin
   override-write guard (`POST .../role-overrides` targeting dev-admin's own
   sub → `400`, and its role_code stays `admin` afterward), instant session
   revocation, and logout (including that Keycloak's `prompt=login` actually
@@ -2207,7 +2506,78 @@ pnpm stack:up
 For whoever (human or agent) picks this repo up next — what changed most
 recently, and where to look first.
 
-**What just happened**: a platform consolidation pass (§10f) rather than a
+**What just happened**: the first real exercise of §10d — a Lovable
+re-export of `apps/engineering` (two months of upstream work: a repair
+scheduling feature + UI polish) was merged into the already-ingested,
+already-rewritten app **without** re-ingesting, and the hosted instance's
+production data (479 jobs, 206 requisitions, 41 users, the full machine
+catalog) arrived as CSVs alongside it and was **deliberately not
+imported**. The code side went smoothly and taught the playbook one
+technique: 3-way-merging each changed file against the archived baseline
+(`git merge-file --diff3`) resolved 3 of 8 files with zero conflicts
+(including the 900-line `AdminPage`) and left only trivial
+"ingestion-deleted vs. Lovable-edited" conflicts elsewhere; only
+`HistoryPage` needed real hand-work. New migration
+`20260915000000_repair_scheduling.sql` (5 columns + 1 function, no new
+RLS), applied to the existing volume with the pre-existing rows intact.
+The data side is the important decision to understand: every
+person-referencing column in the CSVs carries a hosted Supabase Auth uid
+with no Keycloak counterpart yet, and the hosted `departments` table
+conflates this app's repair sub-groups with company departments that
+CentralHub's platform list is meant to own — so a partial import
+(NULLed FKs + legacy-name columns) was designed, then rejected in favour
+of waiting for a complete mapping. §13's engineering table now carries a
+six-point prerequisite checklist for that one-shot import; the CSVs are
+archived at `apps/engineering/archive/20260915-update/data/`.
+
+**Verification**: `pnpm test:stack` **158/158** (was 148; 8 new
+assertions borrow a `pending_assign` job, push it past a synthetic
+deadline, call `rpc/expire_pending_schedules`, confirm `cancelled_at` is
+set while `status` is untouched, and restore it). `tsc --noEmit` on
+`apps/engineering` reports exactly the same pre-existing error set before
+and after (all in `RoleRulesPanel`/`audit.ts`/`useAuth`, from the
+app-local tables `types.ts` never described — untouched this session,
+the Vite build doesn't typecheck). The rebuilt `app-engineering` image
+confirmed to serve the new feature strings. Then a full live-browser
+pass through every role (reporter → leader → repairer → admin → history)
+with a seeded test cast, which produced §10g — seven pre-existing issues
+fixed, four more migrations, and a redesigned audit log. Final
+`pnpm test:stack` **159/159**.
+
+**Files touched this session**: `apps/engineering/src/` — `pages/{Reporter,
+Leader,Repairer,Admin,History}Page.tsx`, `components/{JobDetailDialog,
+JobFilters,PartsRequisitionTab,RoleRulesPanel}.tsx`, new
+`components/{JobStatusChips,SetRepairDateDialog}.tsx`, `hooks/useAuth.tsx`,
+`lib/{auth-utils,pdf-export}.ts`, `integrations/supabase/types.ts`
+(replaced with the new export's copy); new
+`db/migrations/20260915000000_repair_scheduling.sql`,
+`20260915000001_profile_username.sql` and
+`20260915000002_group_override_sync.sql`, a vocabulary header on
+`20260716000000_schema.sql`, `scripts/migrate.sh`; new
+`archive/20260915-update/` (stripped export + `data/*.csv`) and
+`archive/README.md`; `services/auth-gateway/src/{oidc,session}.ts`,
+`routes/{callback,dataToken}.ts` (username claim), `attributes.ts` (test-cast
+seed); later in the pass: new `components/{RejectJobDialog,AuditLogPanel}.tsx`,
+`lib/jobHistory.ts`, migrations `20260915000003_job_history_kind.sql` and
+`20260915000004_dev_seed_aliases.sql`; `scripts/test-stack.mjs`; this README
+(§10b vocabulary, §10d playbook amendments + first-run notes, new §10g,
+§11, §13, §17). No gateway, compose, or shared-package changes.
+
+**Where to go next**: (a) the §13 engineering data-import prerequisites —
+creating the 41 Keycloak users and producing the uid→sub mapping is the
+gating work, and it's a people/admin task before it's a code task;
+(b) a fresh-volume (`down -v`) check is now overdue — §10g's seeds were
+only dry-run in a rolled-back transaction, and the live dev volume still
+carries hand-made overrides for the test cast that a fresh stack gets
+from aliases instead; (c) one oddity noticed in
+passing: four `repair_jobs` rows titled "should be rejected (dev-user is
+repairer, not reporter)" exist in the dev volume, dated 07-18 to 07-22 —
+`test-stack.mjs`'s RLS INSERT test correctly gets 403 today, so these
+were inserted while dev-user temporarily held a `reporter` override
+during an earlier manual session; harmless dev-seed noise, delete via the
+admin panel if it bothers anyone.
+
+**Older handoff, preserved below for now**: a platform consolidation pass (§10f) rather than a
 new app. Started from a "is the foundation ready for more mini-apps?"
 review of the previous session's resource-booking work: it had exposed
 that only the frontend half of the app factory was templated — the
@@ -2587,7 +2957,10 @@ All fixed:
    session's own discussion; see §13's new row on this). A read-only
    "ประวัติการดำเนินการ" (Audit) tab was added to `AdminPage.tsx`
    (`AuditTab`, last 200 rows) so the log is actually visible somewhere,
-   not just written.
+   not just written. *(Since superseded — §10g: the tab became
+   `AuditLogPanel.tsx` with a table and filters, and `job_history` is no
+   longer dead: it now holds per-job rejection entries, which is a fit for
+   its CASCADE semantics in a way an audit log never was.)*
 7. **No confirm dialog on delete or on assign/reassign, and no way to
    undo an assignment**: `AdminPage.tsx`'s job delete used a raw browser
    `confirm()`; `LeaderPage.tsx`'s assign/reassign fired straight from a
@@ -2619,7 +2992,10 @@ All fixed:
    (§10b's earlier "Full name instead of a raw code" polish already fixed
    the *missing*-name case but left this parenthetical in place). Removed
    from all four; left `machine.code` (a real asset tag, e.g. `"Press A
-   (M-102)"`) untouched — different thing entirely, not vestigial.
+   (M-102)"`) untouched — different thing entirely, not vestigial. *(Since
+   superseded — §10g made `profiles.code` the Keycloak username, so the
+   `"Full Name (dev-user)"` form the 2026-09 upstream merge reintroduced in
+   the leader's assign dropdown is now meaningful rather than vestigial.)*
 
 Also created four more dev demo accounts, `dev-user2`..`dev-user5`
 (`devuser2123`..`devuser5123`, same convention as `dev-user`), so testing

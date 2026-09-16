@@ -327,6 +327,36 @@ async function seedRoleRulesIfEmpty(
   }
 }
 
+// Same guard for per-user overrides: only while the app has none at all,
+// so an admin's later edits/deletes in RoleRulesPanel's "Exceptions"
+// section are never resurrected by a restart.
+async function seedRoleOverridesIfEmpty(
+  appId: string,
+  overrides: { username: string; roleCode: string }[],
+): Promise<void> {
+  const existing = await pool.query("SELECT 1 FROM app_role_overrides WHERE app_id = $1 LIMIT 1", [appId]);
+  if ((existing.rowCount ?? 0) > 0) return;
+  for (const o of overrides) {
+    const sub = await findUserSubByUsername(o.username);
+    if (!sub) continue;
+    await pool.query(
+      "INSERT INTO app_role_overrides (app_id, user_sub, role_code) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+      [appId, sub, o.roleCode],
+    );
+  }
+}
+
+// Attributes only for a user who has none yet (unlike dev-admin/dev-user
+// below, which are re-asserted every start as the canonical demo pair) —
+// these are the live-test cast for apps/engineering, and a tester is
+// expected to change them from the admin panel.
+async function seedAttributesIfUnset(username: string, attrs: UserAttributes): Promise<void> {
+  const sub = await findUserSubByUsername(username);
+  if (!sub) return;
+  if (await getUserAttributes(sub)) return;
+  await upsertUserAttributes(sub, attrs);
+}
+
 // Dev-only demo seed data — mirrors permissions.ts's seedDevPermissions()
 // exactly (same retry rationale: Keycloak's own boot regularly outlasts
 // Postgres's). Reproduces the manual curl-seeded state from this feature's
@@ -365,6 +395,24 @@ export async function seedDevAttributes(maxAttempts = 45, delayMs = 2000): Promi
       await seedRoleRulesIfEmpty("engineering", [
         { roleCode: "admin", department: null, position: "Manager", jobLevel: null },
         { roleCode: "repairer", department: null, position: "Staff", jobLevel: "Junior" },
+      ]);
+      // apps/engineering live-test cast (README §10g): one account per role,
+      // all routed to the same repair group so a job filed by the reporter
+      // reaches the leader, who can assign it to the repairer:
+      //   dev-user4  reporter  (override)   department Finance     → ช่างผลิต
+      //   dev-user5  leader    (override)   department Operations  → ช่างผลิต
+      //   dev-user   repairer  (Staff/Junior rule above) Purchasing → ช่างผลิต
+      //   dev-admin  admin
+      // The department → repair-group routing itself is seeded on the
+      // engineering side (db/migrations/20260915000004_dev_seed_aliases.sql)
+      // since it lives in that app's own DB; neither the Staff/Senior nor
+      // Staff/Mid attributes below match the repairer rule, so without the
+      // overrides dev-user4/5 would resolve to no role at all.
+      await seedAttributesIfUnset("dev-user4", { department: "Finance", position: "Staff", jobLevel: "Senior" });
+      await seedAttributesIfUnset("dev-user5", { department: "Operations", position: "Staff", jobLevel: "Mid" });
+      await seedRoleOverridesIfEmpty("engineering", [
+        { username: "dev-user4", roleCode: "reporter" },
+        { username: "dev-user5", roleCode: "leader" },
       ]);
       return;
     } catch (err) {

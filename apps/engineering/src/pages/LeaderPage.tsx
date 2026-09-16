@@ -1,15 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Eye, BarChart3, ListChecks, History, Package, Undo2 } from "lucide-react";
+import { Eye, BarChart3, ListChecks, History, Package, Undo2, XCircle } from "lucide-react";
 import { PartsRequisitionTab } from "@/components/PartsRequisitionTab";
 import { JobFilters, filterJobs } from "@/components/JobFilters";
 import { StatusBadge } from "@/components/StatusBadge";
+import { JobStatusChips } from "@/components/JobStatusChips";
 import { JobDetailDialog, type JobDetail } from "@/components/JobDetailDialog";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import { RejectJobDialog } from "@/components/RejectJobDialog";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { useJobAlerts } from "@/hooks/useJobAlerts";
 import { logAudit } from "@/lib/audit";
+import { recordRejection } from "@/lib/jobHistory";
+import { thaiDate } from "@/lib/auth-utils";
 import { Button } from "@/components/ui/button";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
@@ -19,7 +23,7 @@ import {
   PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend,
 } from "recharts";
 
-type Job = JobDetail & { reporter_name?: string; assignee_name?: string; machine_name?: string };
+type Job = JobDetail & { reporter_name?: string; assignee_name?: string; machine_name?: string; machine_code?: string | null };
 type Repairer = { id: string; full_name: string; code: string };
 
 // One shared confirm dialog for every job-assignment mutation below, rather
@@ -51,9 +55,11 @@ function LeaderPage() {
   const [hMonth, setHMonth] = useState("all");
   const [sMonth, setSMonth] = useState("all");
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+  const [rejectJob, setRejectJob] = useState<Job | null>(null);
 
   const load = async () => {
     if (!profile?.department_id) return;
+    await supabase.rpc("expire_pending_schedules");
     const [{ data: j }, { data: profs }, { data: machs }] = await Promise.all([
       supabase.from("repair_jobs").select("*").eq("department_id", profile.department_id).order("created_at", { ascending: false }),
       supabase.from("profiles").select("id, code, full_name, department_id"),
@@ -62,8 +68,8 @@ function LeaderPage() {
     const m = new Map<string, string>();
     profs?.forEach((p) => m.set(p.id, p.full_name));
     setProfMap(m);
-    const machMap = new Map<string, string>();
-    (machs ?? []).forEach((mm) => machMap.set(mm.id, mm.code ? `${mm.name} (${mm.code})` : mm.name));
+    const machMap = new Map<string, { name: string; code: string | null }>();
+    (machs ?? []).forEach((mm) => machMap.set(mm.id, { name: mm.name, code: mm.code }));
 
     // Role is JWT-resolved only, not stored in any table (see this app's own
     // schema migration) — the repairer roster can't be found with a
@@ -86,12 +92,16 @@ function LeaderPage() {
     setReps((profs ?? [])
       .filter((p) => repIds.has(p.id) && p.department_id === profile.department_id)
       .map((p) => ({ id: p.id, code: p.code, full_name: p.full_name })));
-    const enriched: Job[] = (j ?? []).map((row) => ({
-      ...(row as unknown as JobDetail),
-      reporter_name: m.get(row.reporter_id) ?? "-",
-      assignee_name: row.assigned_to ? (m.get(row.assigned_to) ?? "-") : "-",
-      machine_name: row.machine_id ? machMap.get(row.machine_id) : undefined,
-    }));
+    const enriched: Job[] = (j ?? []).map((row) => {
+      const mach = row.machine_id ? machMap.get(row.machine_id) : undefined;
+      return {
+        ...(row as unknown as JobDetail),
+        reporter_name: m.get(row.reporter_id) ?? "-",
+        assignee_name: row.assigned_to ? (m.get(row.assigned_to) ?? "-") : "-",
+        machine_name: mach?.name ?? undefined,
+        machine_code: mach?.code ?? null,
+      };
+    });
     setJobs(enriched);
   };
   useEffect(() => { load(); }, [profile?.department_id]);
@@ -136,15 +146,36 @@ function LeaderPage() {
   // Sends an assigned job back to pending_assign -- e.g. to reconsider or
   // fix a wrong assignment -- clearing the assignment fields the same way
   // they looked before assign() ever ran.
+  // parts_ready is cleared too so the job returns to a clean pending state
+  // (the flag only means anything while someone is assigned to it).
   const revertToPending = async (job: Job) => {
     const fromName = job.assigned_to ? profMap.get(job.assigned_to) ?? "-" : "-";
     const { error } = await supabase.from("repair_jobs").update({
-      assigned_to: null, assigned_by: null, assigned_at: null, status: "pending_assign",
+      assigned_to: null, assigned_by: null, assigned_at: null, status: "pending_assign", parts_ready: false,
     }).eq("id", job.id);
     if (error) toast.error(error.message);
     else {
       await logAudit(profile, "job.revert_to_pending", { id: job.id, job_code: job.job_code }, { from: fromName });
       toast.success("ส่งงานกลับไม่มอบหมายแล้ว");
+      await load();
+    }
+  };
+
+  // A job awaiting the reporter's review is finished work with a summary and
+  // parts list attached — reassigning or un-assigning it would strand that
+  // data on a job that then looks unstarted. The only leader action there is
+  // to reject it back to in_progress (same transition the reporter's own
+  // reject makes, with a reason); reassign/revert become available again
+  // once the status is back to in_progress/waiting_parts/external.
+  const rejectReview = async (job: Job, reason: string) => {
+    const { error } = await supabase.from("repair_jobs").update({
+      status: "in_progress", reject_reason: reason, reviewed_at: null,
+    }).eq("id", job.id);
+    if (error) toast.error(error.message);
+    else {
+      if (profile) await recordRejection(job.id, profile.id, reason);
+      await logAudit(profile, "job.leader_reject", { id: job.id, job_code: job.job_code }, { reason });
+      toast.success("ส่งกลับให้ผู้ซ่อมแก้ไขแล้ว");
       await load();
     }
   };
@@ -158,8 +189,8 @@ function LeaderPage() {
     else await revertToPending(action.job);
   };
 
-  const pending = jobs.filter((j) => j.status === "pending_assign");
-  const active = jobs.filter((j) => ["in_progress", "waiting_parts", "external", "awaiting_review"].includes(j.status));
+  const pending = jobs.filter((j) => j.status === "pending_assign" && !j.cancelled_at);
+  const active = jobs.filter((j) => ["in_progress", "waiting_parts", "external", "awaiting_review"].includes(j.status) && !j.cancelled_at);
 
   const allMonths = useMemo(() => {
     const s = new Set<string>();
@@ -171,6 +202,18 @@ function LeaderPage() {
     () => sMonth === "all" ? jobs : jobs.filter((j) => monthKey(j.created_at) === sMonth),
     [jobs, sMonth],
   );
+
+  // Monthly summary per technician: received (this month), backlog (all time), completed (this month)
+  const thisMonth = monthKey(new Date().toISOString());
+  const monthSummary = useMemo(() => {
+    return reps.map((r) => {
+      const mine = jobs.filter((j) => j.assigned_to === r.id && !j.cancelled_at);
+      const received = mine.filter((j) => j.assigned_at && monthKey(j.assigned_at) === thisMonth).length;
+      const backlog = mine.filter((j) => ["in_progress", "waiting_parts", "external", "awaiting_review"].includes(j.status)).length;
+      const done = mine.filter((j) => j.status === "completed" && j.completed_at && monthKey(j.completed_at) === thisMonth).length;
+      return { rep: r, received, backlog, done };
+    });
+  }, [reps, jobs, thisMonth]);
 
   // Stats per technician (filtered by month)
   const techStats = useMemo(() => {
@@ -186,8 +229,8 @@ function LeaderPage() {
   if (!profile?.department_id) {
     return (
       <div className="card-soft p-5 text-sm text-muted-foreground">
-        แผนก/สังกัดของคุณยังไม่ได้ถูกกำหนดในระบบนี้ กรุณาติดต่อผู้ดูแลระบบให้ตั้งค่า
-        "กำหนดแผนกรายบุคคล" หรือ "จับคู่แผนก CentralHub" ให้บัญชีของคุณ
+        สังกัดช่างของคุณยังไม่ได้ถูกกำหนดในระบบนี้ กรุณาติดต่อผู้ดูแลระบบให้ตั้งค่า
+        "กำหนดสังกัดช่างรายบุคคล" หรือ "จับคู่แผนก → สังกัดช่าง" ให้บัญชีของคุณ
       </div>
     );
   }
@@ -216,26 +259,41 @@ function LeaderPage() {
               <h2 className="font-bold mb-3">งานรอจ่ายให้ผู้ซ่อม <span className="status-pill bg-warning/30">{pending.length}</span></h2>
               <div className="space-y-2">
                 {pending.length === 0 && <div className="text-muted-foreground text-sm">ยังไม่มีงานใหม่จากผู้แจ้ง</div>}
-                {pending.map((j) => (
+                {pending.map((j) => {
+                  const awaitingSchedule = !j.scheduled_repair_date;
+                  return (
                   <div key={j.id} className="border rounded-lg p-3 space-y-2">
-                    <div className="flex items-center gap-2 text-xs">
+                    <div className="flex items-center gap-2 text-xs flex-wrap">
                       <span className="font-mono text-brand">{j.job_code}</span>
-                      <StatusBadge status={j.status} />
+                      <JobStatusChips job={j} />
                     </div>
                     <div className="font-semibold">{j.title}</div>
-                    {j.description && <div className="text-sm text-muted-foreground">{j.description}</div>}
+                    <div className="text-xs text-muted-foreground space-y-0.5">
+                      <div>รหัสเครื่อง: {j.machine_code ?? "-"} · เครื่อง: {j.machine_name ?? "-"}</div>
+                      <div>อาการ/รายละเอียด: {j.description ?? "-"}</div>
+                    </div>
                     <div className="text-xs text-muted-foreground">
                       ผู้แจ้ง: {profMap.get(j.reporter_id) ?? "-"} · {new Date(j.created_at).toLocaleString("th-TH")}
                     </div>
+                    {j.scheduled_repair_date && (
+                      <div className="text-xs">วันซ่อม: <span className="font-semibold">{thaiDate(j.scheduled_repair_date)}</span></div>
+                    )}
+                    {awaitingSchedule && (
+                      <div className="text-xs text-warning-foreground bg-warning/20 rounded px-2 py-1">
+                        รอผู้แจ้งกำหนดวันซ่อม — ยังไม่สามารถจ่ายงานได้
+                        {j.schedule_deadline && ` (หมดเขต ${thaiDate(j.schedule_deadline)})`}
+                      </div>
+                    )}
                     <div className="flex gap-2 items-center">
                       <Select
                         value=""
+                        disabled={awaitingSchedule}
                         onValueChange={(v) => {
                           const rep = reps.find((r) => r.id === v);
                           if (rep) setPendingAction({ type: "assign", job: j, repId: rep.id, repName: rep.full_name });
                         }}
                       >
-                        <SelectTrigger><SelectValue placeholder="จ่ายงานให้ผู้ซ่อม…" /></SelectTrigger>
+                        <SelectTrigger><SelectValue placeholder={awaitingSchedule ? "รอกำหนดวันซ่อม" : "จ่ายงานให้ผู้ซ่อม…"} /></SelectTrigger>
                         <SelectContent>
                           {reps.length === 0 && <SelectItem value="-" disabled>ยังไม่มีผู้ซ่อมในสังกัด</SelectItem>}
                           {reps.map((r) => <SelectItem key={r.id} value={r.id}>{r.full_name}</SelectItem>)}
@@ -244,7 +302,37 @@ function LeaderPage() {
                       <Button size="sm" variant="outline" onClick={() => setDetail(j)}><Eye className="size-4" /></Button>
                     </div>
                   </div>
-                ))}
+                );})}
+              </div>
+
+              <div className="mt-5 pt-4 border-t">
+                <div className="text-sm font-bold mb-2">สรุปงานผู้ซ่อม · {monthLabel(thisMonth)}</div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-muted-foreground">
+                        <th className="text-left font-medium py-1">ผู้ซ่อม</th>
+                        <th className="text-center font-medium py-1">รับงาน</th>
+                        <th className="text-center font-medium py-1">งานค้าง</th>
+                        <th className="text-center font-medium py-1">สำเร็จ</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {monthSummary.map((s) => (
+                        <tr key={s.rep.id} className="border-t">
+                          <td className="py-1.5 font-semibold">{s.rep.full_name}</td>
+                          <td className="py-1.5 text-center font-bold text-emerald-600">{s.received}</td>
+                          <td className="py-1.5 text-center font-bold text-red-600">{s.backlog}</td>
+                          <td className="py-1.5 text-center font-bold text-blue-600">{s.done}</td>
+                        </tr>
+                      ))}
+                      {monthSummary.length === 0 && (
+                        <tr><td colSpan={4} className="py-2 text-muted-foreground">ยังไม่มีผู้ซ่อมในสังกัด</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="text-[11px] text-muted-foreground mt-1">รับงาน/สำเร็จ นับเฉพาะเดือนนี้ (รีเซ็ตทุกสิ้นเดือน) · งานค้าง นับสะสมทุกเดือน</div>
               </div>
             </div>
 
@@ -253,16 +341,30 @@ function LeaderPage() {
               <div className="space-y-2 max-h-[40rem] overflow-y-auto">
                 {active.map((j) => (
                   <div key={j.id} className="border rounded-lg p-3 space-y-2">
-                    <div className="flex items-center gap-2 text-xs">
+                    <div className="flex items-center gap-2 text-xs flex-wrap">
                       <span className="font-mono text-brand">{j.job_code}</span>
-                      <StatusBadge status={j.status} />
+                      <JobStatusChips job={j} />
                     </div>
                     <div className="font-semibold">{j.title}</div>
+                    <div className="text-xs text-muted-foreground space-y-0.5">
+                      <div>รหัสเครื่อง: {j.machine_code ?? "-"} · เครื่อง: {j.machine_name ?? "-"}</div>
+                      <div>อาการ/รายละเอียด: {j.description ?? "-"}</div>
+                    </div>
                     <div className="text-xs text-muted-foreground">
                       ผู้ซ่อม: {j.assigned_to ? profMap.get(j.assigned_to) ?? "-" : "-"}
                     </div>
                     <div className="flex gap-2 items-center flex-wrap">
-                      {j.status !== "awaiting_review" && (
+                      {j.status === "awaiting_review" ? (
+                        <>
+                          <Button size="sm" variant="outline" onClick={() => setRejectJob(j)}>
+                            <XCircle className="size-4 mr-1" />ปฏิเสธงาน (ส่งกลับให้แก้ไข)
+                          </Button>
+                          <span className="text-xs text-muted-foreground">
+                            รอผู้แจ้งตรวจรับ — ย้าย/ส่งกลับไม่มอบหมายได้หลังปฏิเสธงานเท่านั้น
+                          </span>
+                        </>
+                      ) : (
+                      <>
                         <Select
                           value={j.assigned_to ?? undefined}
                           onValueChange={(v) => {
@@ -275,13 +377,14 @@ function LeaderPage() {
                             {reps.map((r) => <SelectItem key={r.id} value={r.id}>{r.full_name}</SelectItem>)}
                           </SelectContent>
                         </Select>
-                      )}
                       <Button
                         size="sm" variant="outline"
                         onClick={() => setPendingAction({ type: "revert", job: j })}
                       >
                         <Undo2 className="size-4 mr-1" />ส่งกลับไม่มอบหมาย
                       </Button>
+                      </>
+                      )}
                       <Button size="sm" variant="outline" onClick={() => setDetail(j)}><Eye className="size-4 mr-1" />รายละเอียด</Button>
                     </div>
                   </div>
@@ -380,6 +483,13 @@ function LeaderPage() {
       </Tabs>
 
       <JobDetailDialog job={detail} open={!!detail} onOpenChange={(o) => !o && setDetail(null)} />
+      <RejectJobDialog
+        open={!!rejectJob}
+        onOpenChange={(o) => !o && setRejectJob(null)}
+        jobCode={rejectJob?.job_code}
+        description={'งานจะกลับไปสถานะ "กำลังซ่อม" ให้ผู้ซ่อมคนเดิมแก้ไข — ย้ายงานหรือส่งกลับไม่มอบหมายได้หลังจากนั้น'}
+        onConfirm={(reason) => rejectJob ? rejectReview(rejectJob, reason) : undefined}
+      />
 
       <ConfirmDialog
         open={!!pendingAction}

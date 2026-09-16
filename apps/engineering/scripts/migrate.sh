@@ -2,8 +2,11 @@
 # One-shot migration runner for engineering-db. Two phases, in order:
 #
 # 1. Apply 20260716000000_schema.sql, 20260716000001_rls.sql,
-#    20260717000000_dept_user_overrides.sql, and 20260717000001_audit_log.sql
-#    — every statement across all four is idempotent (IF NOT EXISTS /
+#    20260717000000_dept_user_overrides.sql, 20260717000001_audit_log.sql,
+#    20260915000000_repair_scheduling.sql, 20260915000001_profile_username.sql,
+#    20260915000002_group_override_sync.sql, 20260915000003_job_history_kind.sql,
+#    and 20260915000004_dev_seed_aliases.sql — every statement across all nine
+#    is idempotent (IF NOT EXISTS /
 #    OR REPLACE / DROP POLICY IF EXISTS+CREATE / ON CONFLICT), so they're
 #    simply re-applied on every container start; no "is this already
 #    migrated" check needed.
@@ -30,6 +33,11 @@ psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/20260716000000_schema.sql"
 psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/20260716000001_rls.sql"
 psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/20260717000000_dept_user_overrides.sql"
 psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/20260717000001_audit_log.sql"
+psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/20260915000000_repair_scheduling.sql"
+psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/20260915000001_profile_username.sql"
+psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/20260915000002_group_override_sync.sql"
+psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/20260915000003_job_history_kind.sql"
+psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/20260915000004_dev_seed_aliases.sql"
 
 echo "engineering-migrate: waiting for storage-engineering..."
 until wget -q -O /dev/null "$STORAGE_HEALTH_URL"; do sleep 2; done

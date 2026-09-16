@@ -1,13 +1,21 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import { supabase, getResolvedRoleCode } from "@/integrations/supabase/client";
+import { supabase, getResolvedRoleCode, getResolvedDeptName } from "@/integrations/supabase/client";
 import type { AppRole } from "@/lib/auth-utils";
 
+// Two different "departments" — see the vocabulary block at the top of
+// db/migrations/20260716000000_schema.sql:
+//   department      = where the user actually works (CentralHub's own
+//                     attribute, JWT dept_name claim) — display only here.
+//   department_id / repair_group_name = the engineering repair group
+//                     (สังกัดช่าง) responsible for that department's jobs,
+//                     resolved by ensure_profile()/current_dept().
 export type Profile = {
   id: string;
-  code: string;
+  code: string;          // CentralHub username (Keycloak preferred_username)
   full_name: string;
+  department: string | null;
   department_id: string | null;
-  department_name?: string | null;
+  repair_group_name: string | null;
 };
 
 type AuthState = {
@@ -49,15 +57,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       const row = data as unknown as {
         id: string; code: string; full_name: string;
-        department_id: string | null; department_name: string | null;
+        department_id: string | null;
       };
+      // ensure_profile() returns a bare profiles row (no join), so the
+      // repair group's display name is a second lookup — ReporterPage's
+      // read-only "สังกัดช่างที่รับผิดชอบ" field is the main consumer.
+      let repairGroupName: string | null = null;
+      if (row.department_id) {
+        const { data: grp } = await supabase
+          .from("departments").select("name").eq("id", row.department_id).maybeSingle();
+        repairGroupName = grp?.name ?? null;
+      }
       setUserId(row.id);
       setProfile({
         id: row.id,
         code: row.code,
         full_name: row.full_name,
+        department: await getResolvedDeptName(),
         department_id: row.department_id,
-        department_name: row.department_name,
+        repair_group_name: repairGroupName,
       });
     } finally {
       setLoading(false);
