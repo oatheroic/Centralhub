@@ -39,6 +39,40 @@ the exact prerequisites. Notes for whoever does that import:
 - `repair_jobs.csv` already includes the scheduling columns this update's
   migration adds, so it loads against the post-update schema as-is.
 
+### `20260915-update/data/repair-images/` — mirrored bucket objects (2026-09-16)
+
+The 292 photos `repair_jobs.csv` references (`image_url` /
+`completed_image_url`, 293 refs, all on the hosted project's public
+`repair-images` bucket) were pulled down on 2026-09-16 by
+`apps/engineering/db/import/fetch-images.mjs`, keyed exactly as in the
+hosted bucket (`<hosted-uid>/<timestamp>_<name>.<ext>`). Only
+`manifest.json` is tracked (key, source URL, referencing job ids, bytes,
+sha256, content type, per-object status — none were missing upstream);
+the ~375 MB of raw files are gitignored and re-fetched with the same
+script (idempotent — skips what's already on disk at the recorded size)
+while the hosted bucket is still up, or copied from another machine and
+checked against the manifest.
+
+`repair-images-normalized/` (also gitignored, regenerable) is what actually
+gets served: `db/import/normalize-images.mjs` runs every raw object through
+the same policy the app now applies client-side on upload
+(`src/lib/imageUpload.ts` — EXIF-rotated, ≤1600px, JPEG stepped down to
+~350 KB, smallest result kept if that can't be hit), writing
+`<same key>.jpg` and a `normalized` block per object into the manifest.
+Two decoders: `sharp` for JPEG/PNG, `heic-convert` (pure-WASM libheif +
+libde265) for the 5 iPhone HEICs sharp's prebuilt libheif can't decode.
+Result: 375 MB → 52.5 MB, every object ≤385 KB and browser-renderable.
+
+Unlike the CSVs, these have already been loaded: `db/import/upload-images.sh`
+pushes the normalized set into a stack's `storage-engineering` under the
+`.jpg` keys (run against dev 2026-09-16; re-run against production
+alongside the row import — same command, it's idempotent and also removes
+any raw-key leftovers from an earlier run). The row import rewrites each
+URL with `lib.mjs`'s `rewriteImageUrl(url, manifest)` — hosted URL →
+root-relative `/apps/engineering/api/storage/v1/object/public/repair-images/<normalized key>`.
+A row whose image was never mirrored is still imported with its rewritten
+(dead) link rather than held.
+
 ## What was stripped from the raw export, and why
 
 Every snapshot above has already had the following removed before being

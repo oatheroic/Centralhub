@@ -1,0 +1,5 @@
+# Normalized (≤1600px JPEG) copies of ../repair-images/, produced by
+# apps/engineering/db/import/normalize-images.mjs and recorded in
+# ../repair-images/manifest.json (`normalized` block). Regenerable; untracked.
+*
+!.gitignore

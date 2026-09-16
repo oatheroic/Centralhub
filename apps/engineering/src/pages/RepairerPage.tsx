@@ -8,6 +8,7 @@ import { JobStatusChips } from "@/components/JobStatusChips";
 import { thaiDate, STATUS_LABEL } from "@/lib/auth-utils";
 import { JobDetailDialog, type JobDetail } from "@/components/JobDetailDialog";
 import { supabase } from "@/integrations/supabase/client";
+import { prepareImageForUpload } from "@/lib/imageUpload";
 import { useAuth } from "@/hooks/useAuth";
 import { useJobAlerts } from "@/hooks/useJobAlerts";
 import { Button } from "@/components/ui/button";
@@ -134,8 +135,9 @@ function RepairerPage() {
     try {
       let completed_image_url: string | null = completeJob.completed_image_url ?? null;
       if (completedFile) {
-        const path = `${profile.id}/done_${Date.now()}_${completedFile.name}`;
-        const { error: upErr } = await supabase.storage.from("repair-images").upload(path, completedFile);
+        const prepared = await prepareImageForUpload(completedFile);
+        const path = `${profile.id}/done_${Date.now()}_${prepared.name}`;
+        const { error: upErr } = await supabase.storage.from("repair-images").upload(path, prepared, { contentType: prepared.type });
         if (upErr) throw upErr;
         completed_image_url = supabase.storage.from("repair-images").getPublicUrl(path).data.publicUrl;
       }
@@ -367,7 +369,7 @@ function RepairerPage() {
               <label className="card-soft p-4 grid place-items-center cursor-pointer text-muted-foreground hover:text-brand">
                 <Camera className="size-5 mb-1" />
                 <span className="text-sm">{completedFile ? completedFile.name : "คลิกเพื่อเลือกรูปหลังซ่อม"}</span>
-                <input type="file" accept="image/*" className="hidden"
+                <input type="file" accept="image/*,.heic,.heif" className="hidden"
                   onChange={(e) => setCompletedFile(e.target.files?.[0] ?? null)} />
               </label>
             </div>

@@ -67,7 +67,7 @@ function MultiFileSlot({
           ref={ref}
           type="file"
           multiple
-          accept="image/jpeg,image/png,application/pdf,.jpg,.jpeg,.png,.pdf"
+          accept="image/jpeg,image/png,image/heic,image/heif,application/pdf,.jpg,.jpeg,.png,.heic,.heif,.pdf"
           className="hidden"
           onChange={(e) => {
             const fs = Array.from(e.target.files ?? []);
@@ -195,7 +195,7 @@ function FileEdit({
         <input
           ref={ref}
           type="file"
-          accept="image/jpeg,image/png,application/pdf,.jpg,.jpeg,.png,.pdf"
+          accept="image/jpeg,image/png,image/heic,image/heif,application/pdf,.jpg,.jpeg,.png,.heic,.heif,.pdf"
           className="hidden"
           onChange={async (e) => {
             const f = e.target.files?.[0];

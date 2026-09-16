@@ -1678,7 +1678,7 @@ what one looked like in practice, and what it added to the playbook):
   anticipate, and the right answer was to hold it.** The assumption in
   "why this is a merge problem, not a resync problem" — that the hosted
   project was never used after ingestion — turned out false here: the
-  original Lovable instance kept being *used in production* (479 jobs,
+  original Lovable instance kept being *used in production* (420 jobs,
   206 requisitions, 41 users) while the ingested copy only ever held dev
   seed. So the CSVs weren't a resync, they were the app's real history
   arriving for the first time. Two things made importing them now the
@@ -1826,6 +1826,22 @@ that section remains the playbook and this is the changelog.
   (Staff/Junior rule), **dev-admin** admin — reporter files on an Oven
   machine, leader assigns to Dev User. Verified in a rolled-back
   transaction against the live DB; not yet against a fresh volume (§13).
+- **Photos preprocessed client-side before upload** (`src/lib/imageUpload.ts`,
+  called from the three upload sites: `ReporterPage`, `RepairerPage`,
+  `ReporterEditJobDialog`). Engineering uploaded raw camera files — the
+  hosted history (§13 item 5) shows what that produces: median 370 KB but
+  p90 3.9 MB, max 9.6 MB, plus HEICs no Chromium/Firefox `<img>` can
+  render. Now the same policy `apps/assets` already had (canvas re-encode
+  to JPEG, ≤1600px, quality/width stepped down to ~350 KB), copied per-app
+  per §3, with two changes applied to **both** copies: HEIC/HEIF is
+  decoded in-browser via `heic-to` (libheif WASM, dynamically imported so
+  the ~730 KB gz chunk only loads when someone actually picks a HEIC —
+  iPhone users just upload) instead of being refused, and an image that
+  can't be compressed under target is uploaded at its smallest encode
+  instead of throwing — a big photo is better evidence than no photo.
+  The legacy photos were normalized to the same policy offline
+  (`db/import/normalize-images.mjs`) so old and new rows share one
+  format/size profile.
 
 ---
 
@@ -2197,7 +2213,7 @@ specific to `apps/engineering` (§10b), then everything else.
 
 | Item | Where it would live | Why deferred |
 |---|---|---|
-| **Import the hosted instance's real data** (`archive/20260915-update/data/*.csv` — 479 `repair_jobs`, 206 `parts_requisitions`, 399 `machines`, 76 `machine_types`, 41 `profiles`/`user_roles`, 12 `departments`) into `engineering-db` | A one-shot, idempotent (`ON CONFLICT (id) DO UPDATE`) import script under `apps/engineering/db/` — **not** a migration file (migrations re-run on every start; a data load must not) | Held deliberately (§10d's first-run notes): importing now would mean NULLed FKs and throwaway legacy-name columns. **Prerequisites — check every one before attempting the import**: (1) a Keycloak user for each of the 41 `profiles.csv` rows (its `code` column, e.g. `PK36`/`EN22`, is the employee code; `full_name` the display name), so `ensure_profile()` can provision them; (2) a complete `profiles.id` (hosted Supabase uid) → Keycloak `sub` mapping file covering every uid referenced anywhere in `repair_jobs.reporter_id`/`assigned_to`/`assigned_by`, `parts_requisitions.repairer_id`/`created_by`, and `user_roles.user_id` — the import rewrites every uid through it and must refuse to run on an unmapped one; (3) a decision on the 9 *company* departments the hosted `departments` table carries (บรรจุ, ผลิต, สโตร์, คลังสินค้า, คิวซี, HR, RD, CN, วิศวกรรม — referenced only by `machine_types.department_id`): either the general-table item below (adopt CentralHub's `attribute_values` list directly) lands first, or they're mapped to it explicitly; the 3 repair sub-groups (`machines.repair_department_id`, `parts_requisitions.department_id`, `repair_jobs.department_id`) map by name onto the rows already seeded locally; (4) `user_roles.csv` translated into `app_role_overrides`/`app_role_rules` rows via the existing generic endpoints (no `user_roles` table exists post-ingestion — role is JWT-resolved); (5) the `repair-images` storage bucket contents, if job/completion photos matter — only the URLs are in the CSVs, the objects were never exported; (6) the local dev seed (3 depts, 2 types, 4 machines, 7 jobs) replaced, not merged — `test-stack.mjs`'s engineering section borrows a `pending_assign` job and expects ≥2 departments, so re-run it after. CSV quirks are recorded in `archive/README.md` (semicolon-delimited, literal tabs inside `part_code`, empty string = NULL, three dropped `profiles` columns to skip); `repair_jobs.csv` already carries the scheduling columns this update added. |
+| **Import the hosted instance's real data** (`archive/20260915-update/data/*.csv` — 420 `repair_jobs` (479 is the file's line count; descriptions contain quoted newlines), 206 `parts_requisitions`, 399 `machines`, 76 `machine_types`, 41 `profiles`/`user_roles`, 12 `departments`) into `engineering-db` | A one-shot, idempotent (`ON CONFLICT (id) DO UPDATE`) import script under `apps/engineering/db/` — **not** a migration file (migrations re-run on every start; a data load must not) | Held deliberately (§10d's first-run notes): importing now would mean NULLed FKs and throwaway legacy-name columns. **Prerequisites — check every one before attempting the import**: (1) a Keycloak user for each of the 41 `profiles.csv` rows (its `code` column, e.g. `PK36`/`EN22`, is the employee code; `full_name` the display name), so `ensure_profile()` can provision them; (2) a complete `profiles.id` (hosted Supabase uid) → Keycloak `sub` mapping file covering every uid referenced anywhere in `repair_jobs.reporter_id`/`assigned_to`/`assigned_by`, `parts_requisitions.repairer_id`/`created_by`, and `user_roles.user_id` — the import rewrites every uid through it and must refuse to run on an unmapped one; (3) a decision on the 9 *company* departments the hosted `departments` table carries (บรรจุ, ผลิต, สโตร์, คลังสินค้า, คิวซี, HR, RD, CN, วิศวกรรม — referenced only by `machine_types.department_id`): either the general-table item below (adopt CentralHub's `attribute_values` list directly) lands first, or they're mapped to it explicitly; the 3 repair sub-groups (`machines.repair_department_id`, `parts_requisitions.department_id`, `repair_jobs.department_id`) map by name onto the rows already seeded locally; (4) `user_roles.csv` translated into `app_role_overrides`/`app_role_rules` rows via the existing generic endpoints (no `user_roles` table exists post-ingestion — role is JWT-resolved); (5) ~~the `repair-images` storage bucket contents~~ **done 2026-09-16**: all 292 referenced objects are mirrored under `archive/20260915-update/data/repair-images/` (manifest tracked, files gitignored — see `archive/README.md`), normalized by `db/import/normalize-images.mjs` to the same ≤1600px/~350 KB JPEG policy the app now applies on upload (375 MB → 52 MB, the 5 HEICs converted), and `db/import/upload-images.sh` loads the normalized set into any stack's `storage-engineering` (already run on dev; re-run on production alongside the row import). The row import just rewrites `image_url`/`completed_image_url` via `db/import/lib.mjs`'s `rewriteImageUrl(url, manifest)` to root-relative gateway URLs — no need to skip or refuse a row on a missing image, the manifest says none were; (6) the local dev seed (3 depts, 2 types, 4 machines, 7 jobs) replaced, not merged — `test-stack.mjs`'s engineering section borrows a `pending_assign` job and expects ≥2 departments, so re-run it after. CSV quirks are recorded in `archive/README.md` (semicolon-delimited, literal tabs inside `part_code`, empty string = NULL, three dropped `profiles` columns to skip); `repair_jobs.csv` already carries the scheduling columns this update added. |
 | Google Sheets sync | `apps/engineering` (originally `sheets.functions.ts`) | Dropped, not re-homed — keeping it (even against a direct Google API) would retain an external SaaS dependency, exactly what this ingestion pattern exists to remove (§10b) |
 | Realtime job-alert popups/sounds | `apps/engineering/src/hooks/useJobAlerts.ts` | Needs a self-hosted Supabase Realtime service, which this ingestion's compose additions (engineering-db/postgrest-engineering/storage-engineering) don't include — a real infra addition of its own. The hook is left in place (harmless — fails to connect, doesn't crash the page) rather than removed |
 | `department_head` role has no dedicated page | `apps/engineering/src/App.tsx` | The original export never built one either (only admin/leader/repairer/reporter have pages) — shows a "no screen yet" message rather than inventing a UI with no reference to carry over |
@@ -2510,7 +2526,7 @@ recently, and where to look first.
 re-export of `apps/engineering` (two months of upstream work: a repair
 scheduling feature + UI polish) was merged into the already-ingested,
 already-rewritten app **without** re-ingesting, and the hosted instance's
-production data (479 jobs, 206 requisitions, 41 users, the full machine
+production data (420 jobs, 206 requisitions, 41 users, the full machine
 catalog) arrived as CSVs alongside it and was **deliberately not
 imported**. The code side went smoothly and taught the playbook one
 technique: 3-way-merging each changed file against the archived baseline

@@ -11,6 +11,7 @@ import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
 import { supabase } from "@/integrations/supabase/client";
+import { prepareImageForUpload } from "@/lib/imageUpload";
 
 type Dept = { id: string; name: string };
 type MType = { id: string; name: string; department_id?: string | null };
@@ -80,8 +81,9 @@ export function ReporterEditJobDialog({
     try {
       let image_url = job.image_url;
       if (file) {
-        const path = `${reporterId}/${Date.now()}_${file.name}`;
-        const { error: upErr } = await supabase.storage.from("repair-images").upload(path, file);
+        const prepared = await prepareImageForUpload(file);
+        const path = `${reporterId}/${Date.now()}_${prepared.name}`;
+        const { error: upErr } = await supabase.storage.from("repair-images").upload(path, prepared, { contentType: prepared.type });
         if (upErr) throw upErr;
         image_url = supabase.storage.from("repair-images").getPublicUrl(path).data.publicUrl;
       }
@@ -144,7 +146,7 @@ export function ReporterEditJobDialog({
           </div>
           <div>
             <Label>เปลี่ยน/เพิ่มรูปภาพ (ไม่บังคับ)</Label>
-            <Input type="file" accept="image/*" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+            <Input type="file" accept="image/*,.heic,.heif" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
             {job.image_url && !file && (
               <img src={job.image_url} alt="ปัจจุบัน" className="mt-2 max-h-40 rounded border" />
             )}

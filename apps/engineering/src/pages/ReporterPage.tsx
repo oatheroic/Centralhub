@@ -9,6 +9,7 @@ import { ReporterEditJobDialog, type EditableJob } from "@/components/ReporterEd
 import { SetRepairDateDialog } from "@/components/SetRepairDateDialog";
 import { RejectJobDialog } from "@/components/RejectJobDialog";
 import { supabase } from "@/integrations/supabase/client";
+import { prepareImageForUpload } from "@/lib/imageUpload";
 import { useAuth } from "@/hooks/useAuth";
 import { useJobAlerts } from "@/hooks/useJobAlerts";
 import { thaiDate } from "@/lib/auth-utils";
@@ -101,8 +102,9 @@ function ReporterPage() {
     try {
       let image_url: string | null = null;
       if (file) {
-        const path = `${profile.id}/${Date.now()}_${file.name}`;
-        const { error: upErr } = await supabase.storage.from("repair-images").upload(path, file);
+        const prepared = await prepareImageForUpload(file);
+        const path = `${profile.id}/${Date.now()}_${prepared.name}`;
+        const { error: upErr } = await supabase.storage.from("repair-images").upload(path, prepared, { contentType: prepared.type });
         if (upErr) throw upErr;
         image_url = supabase.storage.from("repair-images").getPublicUrl(path).data.publicUrl;
       }
@@ -259,7 +261,7 @@ function ReporterPage() {
           <label className="card-soft p-4 grid place-items-center cursor-pointer text-muted-foreground hover:text-brand">
             <Camera className="size-5 mb-1" />
             <span className="text-sm">{file ? file.name : "คลิกเพื่อเลือกรูป"}</span>
-            <input type="file" accept="image/*" className="hidden" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+            <input type="file" accept="image/*,.heic,.heif" className="hidden" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
           </label>
         </div>
         <Button type="submit" disabled={busy} className="w-full h-11">

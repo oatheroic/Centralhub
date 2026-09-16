@@ -1019,7 +1019,7 @@ function MultiFileField({
           ref={ref}
           type="file"
           multiple
-          accept="image/jpeg,image/png,application/pdf,.jpg,.jpeg,.png,.pdf"
+          accept="image/jpeg,image/png,image/heic,image/heif,application/pdf,.jpg,.jpeg,.png,.heic,.heif,.pdf"
           className="hidden"
           onChange={(e) => {
             const fs = Array.from(e.target.files ?? []);

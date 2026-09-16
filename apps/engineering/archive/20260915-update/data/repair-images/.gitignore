@@ -1,0 +1,6 @@
+# Mirrored hosted-bucket objects (~375 MB, 292 files) — fetched on demand by
+# apps/engineering/db/import/fetch-images.mjs, verifiable against
+# manifest.json's sha256s. Only the manifest is tracked.
+*
+!.gitignore
+!manifest.json

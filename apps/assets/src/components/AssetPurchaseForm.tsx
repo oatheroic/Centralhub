@@ -886,7 +886,7 @@ function ImageUpload({
         <input
           ref={ref}
           type="file"
-          accept={allowPdf ? "image/jpeg,image/png,application/pdf,application/x-pdf,application/acrobat,applications/vnd.pdf,text/pdf,text/x-pdf,application/octet-stream,.jpg,.jpeg,.png,.pdf" : "image/jpeg,image/png,.jpg,.jpeg,.png"}
+          accept={allowPdf ? "image/jpeg,image/png,image/heic,image/heif,application/pdf,application/x-pdf,application/acrobat,applications/vnd.pdf,text/pdf,text/x-pdf,application/octet-stream,.jpg,.jpeg,.png,.heic,.heif,.pdf" : "image/jpeg,image/png,image/heic,image/heif,.jpg,.jpeg,.png,.heic,.heif"}
           className="hidden"
           onChange={(e) => {
             const f = e.target.files?.[0];
@@ -957,7 +957,7 @@ function MultiFileUpload({
           ref={ref}
           type="file"
           multiple
-          accept="image/jpeg,image/png,application/pdf,application/x-pdf,application/acrobat,applications/vnd.pdf,text/pdf,text/x-pdf,application/octet-stream,.jpg,.jpeg,.png,.pdf"
+          accept="image/jpeg,image/png,image/heic,image/heif,application/pdf,application/x-pdf,application/acrobat,applications/vnd.pdf,text/pdf,text/x-pdf,application/octet-stream,.jpg,.jpeg,.png,.heic,.heif,.pdf"
           className="hidden"
           onChange={(e) => {
             const fs = Array.from(e.target.files ?? []);
