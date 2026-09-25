@@ -53,7 +53,7 @@ function useAttributeValues() {
   });
   useEffect(() => {
     (["department", "position", "job_level"] as const).forEach((kind) => {
-      fetch(`/auth/admin/attribute-values/${kind}`, { credentials: "same-origin" })
+      fetch(`/auth/admin/attribute-values/${kind}?app=${APP_ID}`, { credentials: "same-origin" })
         .then((res) => (res.ok ? (res.json() as Promise<string[]>) : []))
         .then((vals) => setValues((prev) => ({ ...prev, [kind]: vals })));
     });
@@ -77,6 +77,14 @@ type Alias = { id: number; centralhub_department: string; department_id: string 
 type DeptOverride = { id: number; user_sub: string; department_id: string };
 
 const ROLE_OPTIONS: AppRole[] = ["admin", "leader", "department_head", "repairer", "reporter"];
+// Admin is grantable per user (an override) but never by attribute match:
+// a rule is a bulk grant over whoever currently matches a
+// department/position/job-level combination, so "position = Manager ->
+// admin" would silently promote every future Manager. auth-gateway rejects
+// such a rule outright (400, AdminRoleRuleForbiddenError) — this just keeps
+// the UI from offering a choice that cannot succeed. The overrides picker
+// below deliberately still lists every role, admin included.
+const RULE_ROLE_OPTIONS: AppRole[] = ROLE_OPTIONS.filter((r) => r !== "admin");
 
 export default function RoleRulesPanel() {
   return (
@@ -188,7 +196,7 @@ function RulesSection() {
           <Select value={roleCode} onValueChange={(v) => setRoleCode(v as AppRole)}>
             <SelectTrigger><SelectValue /></SelectTrigger>
             <SelectContent>
-              {ROLE_OPTIONS.map((r) => <SelectItem key={r} value={r}>{ROLE_LABEL[r]}</SelectItem>)}
+              {RULE_ROLE_OPTIONS.map((r) => <SelectItem key={r} value={r}>{ROLE_LABEL[r]}</SelectItem>)}
             </SelectContent>
           </Select>
         </div>
@@ -252,7 +260,7 @@ function OverridesSection() {
   async function load() {
     const [rRes, uRes] = await Promise.all([
       fetch(`/auth/admin/apps/${APP_ID}/role-overrides`, { credentials: "same-origin" }),
-      fetch("/auth/admin/users", { credentials: "same-origin" }),
+      fetch(`/auth/admin/users?app=${APP_ID}`, { credentials: "same-origin" }),
     ]);
     if (rRes.ok) setOverrides((await rRes.json()) as Override[]);
     if (uRes.ok) setUsers((await uRes.json()) as KeycloakUser[]);
@@ -382,7 +390,7 @@ function DeptOverridesSection() {
     const [{ data: o }, { data: d }, uRes] = await Promise.all([
       supabase.from("department_user_overrides").select("id, user_sub, department_id").order("id"),
       supabase.from("departments").select("id, name").order("name"),
-      fetch("/auth/admin/users", { credentials: "same-origin" }),
+      fetch(`/auth/admin/users?app=${APP_ID}`, { credentials: "same-origin" }),
     ]);
     setOverrides((o ?? []) as DeptOverride[]);
     setDepts((d ?? []) as Dept[]);
@@ -607,7 +615,7 @@ function DiagnosticsSection() {
 
   useEffect(() => {
     Promise.all([
-      fetch("/auth/admin/users", { credentials: "same-origin" }).then((r) => (r.ok ? r.json() : [])),
+      fetch(`/auth/admin/users?app=${APP_ID}`, { credentials: "same-origin" }).then((r) => (r.ok ? r.json() : [])),
       supabase.from("departments").select("id, name").order("name"),
       supabase.from("department_aliases").select("id, centralhub_department, department_id"),
       supabase.from("department_user_overrides").select("id, user_sub, department_id"),
@@ -625,7 +633,7 @@ function DiagnosticsSection() {
     try {
       const [roleRes, attrRes] = await Promise.all([
         fetch(`/auth/admin/apps/${APP_ID}/resolve-role/${userSub}`, { credentials: "same-origin" }),
-        fetch(`/auth/admin/users/${userSub}/attributes`, { credentials: "same-origin" }),
+        fetch(`/auth/admin/users/${userSub}/attributes?app=${APP_ID}`, { credentials: "same-origin" }),
       ]);
       const role = roleRes.ok ? (await roleRes.json() as { roleCode: string | null }) : { roleCode: null };
       const attrs = attrRes.ok ? (await attrRes.json() as { department: string | null } | null) : null;

@@ -1,5 +1,7 @@
 import { Router, type Response } from "express";
-import { requireSession, requireAdmin, type AuthedRequest } from "../middleware/requireAdmin.js";
+import {
+  requireSession, requireAppAdmin, appIdFromParam, isPlatformScope, type AuthedRequest,
+} from "../middleware/requireAdmin.js";
 import {
   listAppRoleOverrides, upsertAppRoleOverride, deleteAppRoleOverride,
 } from "../attributes.js";
@@ -24,7 +26,7 @@ async function checkKnownApp(appId: string, res: Response): Promise<boolean> {
 adminRoleOverridesRouter.get(
   "/admin/apps/:appId/role-overrides",
   requireSession,
-  requireAdmin,
+  requireAppAdmin(appIdFromParam),
   async (req, res) => {
     const appId = req.params.appId as string;
     if (!(await checkKnownApp(appId, res))) return;
@@ -39,7 +41,7 @@ adminRoleOverridesRouter.get(
 adminRoleOverridesRouter.post(
   "/admin/apps/:appId/role-overrides",
   requireSession,
-  requireAdmin,
+  requireAppAdmin(appIdFromParam),
   async (req: AuthedRequest, res) => {
     const appId = req.params.appId as string;
     if (!(await checkKnownApp(appId, res))) return;
@@ -61,16 +63,26 @@ adminRoleOverridesRouter.post(
       res.status(400).json({ error: "cannot set a role override on your own account" });
       return;
     }
-    // For an app with apps.ts's adminRoleCode set (admin-managed), a
-    // CentralHub Keycloak admin's role_code there is absolute — an override
-    // targeting one would be accepted but silently never take effect
-    // (resolveRoleCode() never reaches the overrides table for them at
-    // all). Reject at write time rather than let an admin believe a dead
-    // override worked.
-    const guaranteedAdminRoleCode = await adminRoleCodeFor(appId);
-    if (guaranteedAdminRoleCode && (await hasRole(userSub, "admin"))) {
+    // A CentralHub platform admin cannot be overridden here, by anyone.
+    // Two reasons, and the second is why this is unconditional:
+    //  - It would not work. isAppAdmin() makes a realm admin an admin of
+    //    every app regardless of this table, so the override would be
+    //    written and then silently ignored. Better to refuse than to let
+    //    someone believe a dead override took effect.
+    //  - It is the floor under delegation. A local admin now has full
+    //    control of their app's rules and overrides (requireAppAdmin), so
+    //    without this they could demote the platform admins of their own
+    //    app — exactly the escalation delegating this power must not open.
+    // Checked before adminRoleCode is consulted at all: the old form was
+    // conditional on the app having an admin role code, which made the
+    // guard silently absent for any app without one.
+    if (await hasRole(userSub, "admin")) {
+      const adminRoleCode = await adminRoleCodeFor(appId);
       res.status(400).json({
-        error: "this user is a CentralHub admin — their role here is always \"" + guaranteedAdminRoleCode + "\", an override would never take effect",
+        error:
+          "this user is a CentralHub platform admin — they are always an admin of every app" +
+          (adminRoleCode ? ` (role "${adminRoleCode}" here)` : "") +
+          ", so an override would never take effect and cannot be used to remove their access",
       });
       return;
     }
@@ -94,7 +106,7 @@ adminRoleOverridesRouter.post(
 adminRoleOverridesRouter.delete(
   "/admin/apps/:appId/role-overrides/:id",
   requireSession,
-  requireAdmin,
+  requireAppAdmin(appIdFromParam),
   async (req: AuthedRequest, res) => {
     const appId = req.params.appId as string;
     if (!(await checkKnownApp(appId, res))) return;
@@ -105,6 +117,27 @@ adminRoleOverridesRouter.delete(
     }
     try {
       const existing = (await listAppRoleOverrides(appId)).find((o) => o.id === id) ?? null;
+      // The other half of the self-lockout guard on POST above. A local
+      // admin holds that status *because* of their override row, so
+      // deleting their own is the one action here that revokes their own
+      // access — and it is unrecoverable through this UI, since the panel
+      // that could restore it is the one they just locked themselves out
+      // of. Blocked rather than warned: there is no legitimate reason to
+      // resign this way, and a platform admin can always remove the
+      // override for them.
+      //
+      // Scoped to local admins deliberately. A platform admin's status
+      // comes from the Keycloak realm role, not this table, so deleting
+      // their own row costs them nothing — and blocking it would leave a
+      // legacy row nobody could clean up.
+      if (existing && existing.userSub === req.session?.sub && !isPlatformScope(req)) {
+        res.status(400).json({
+          error:
+            "cannot delete your own role override — it is what makes you an admin of this app, " +
+            "and removing it here would lock you out of the panel that could restore it",
+        });
+        return;
+      }
       await deleteAppRoleOverride(appId, id);
       void recordAudit({
         actor: { sub: req.session?.sub ?? null, name: req.session?.name ?? "unknown" },

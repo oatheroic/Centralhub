@@ -1,8 +1,10 @@
 import { Router, type Response } from "express";
-import { requireSession, requireAdmin, type AuthedRequest } from "../middleware/requireAdmin.js";
+import {
+  requireSession, requireAppAdmin, appIdFromParam, type AuthedRequest,
+} from "../middleware/requireAdmin.js";
 import {
   listAppRoleRules, createAppRoleRule, deleteAppRoleRule, listAttributeValues, resolveRoleCode,
-  RoleRuleExistsError,
+  RoleRuleExistsError, AdminRoleRuleForbiddenError,
 } from "../attributes.js";
 import { isKnownApp } from "../apps.js";
 import { recordAudit } from "../audit.js";
@@ -23,7 +25,7 @@ async function checkKnownApp(appId: string, res: Response): Promise<boolean> {
 adminRoleRulesRouter.get(
   "/admin/apps/:appId/role-rules",
   requireSession,
-  requireAdmin,
+  requireAppAdmin(appIdFromParam),
   async (req, res) => {
     const appId = req.params.appId as string;
     if (!(await checkKnownApp(appId, res))) return;
@@ -38,7 +40,7 @@ adminRoleRulesRouter.get(
 adminRoleRulesRouter.post(
   "/admin/apps/:appId/role-rules",
   requireSession,
-  requireAdmin,
+  requireAppAdmin(appIdFromParam),
   async (req: AuthedRequest, res) => {
     const appId = req.params.appId as string;
     if (!(await checkKnownApp(appId, res))) return;
@@ -89,6 +91,13 @@ adminRoleRulesRouter.post(
         res.status(409).json({ error: err.message });
         return;
       }
+      // 400, not 403: this is not "you may not do this", it is "this grant
+      // cannot be expressed as a rule at all" — no caller, however
+      // privileged, can create it. See AdminRoleRuleForbiddenError.
+      if (err instanceof AdminRoleRuleForbiddenError) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
       console.error("auth-gateway: role rule creation failed", err);
       res.status(502).json({ error: (err as Error).message });
     }
@@ -103,7 +112,7 @@ adminRoleRulesRouter.post(
 adminRoleRulesRouter.get(
   "/admin/apps/:appId/resolve-role/:userSub",
   requireSession,
-  requireAdmin,
+  requireAppAdmin(appIdFromParam),
   async (req, res) => {
     const appId = req.params.appId as string;
     if (!(await checkKnownApp(appId, res))) return;
@@ -119,7 +128,7 @@ adminRoleRulesRouter.get(
 adminRoleRulesRouter.delete(
   "/admin/apps/:appId/role-rules/:id",
   requireSession,
-  requireAdmin,
+  requireAppAdmin(appIdFromParam),
   async (req: AuthedRequest, res) => {
     const appId = req.params.appId as string;
     if (!(await checkKnownApp(appId, res))) return;

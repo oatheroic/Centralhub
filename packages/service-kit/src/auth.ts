@@ -11,6 +11,15 @@ export type Identity = {
   department: string | null;
   position: string | null;
   jobLevel: string | null;
+  // This app's resolved role code (a per-user override or an attribute
+  // rule), null if the app has no role vocabulary or nothing matched.
+  roleCode: string | null;
+  // Admin *of this app*: a CentralHub realm admin (always, every app) or a
+  // user promoted to this app's own admin role code. One notion, not two —
+  // see auth-gateway's isAppAdmin(). Prefer this over `roles.includes
+  // ("admin")`, which only sees the platform half, and over treating a CRUD
+  // verb like `delete` as a stand-in for admin.
+  isAdmin: boolean;
 };
 
 export type AuthedRequest = Request & { identity?: Identity; permissions?: PermissionSet };
@@ -94,4 +103,10 @@ export function createAuth({ appId, authGatewayUrl }: AuthOptions) {
 // their own booking, but cancelling someone else's needs `delete`".
 export function hasVerb(req: AuthedRequest, verb: Verb): boolean {
   return req.permissions?.[verb] === true;
+}
+
+// Must run after `authenticate`. False when unauthenticated, so it fails
+// closed the same way hasVerb() does.
+export function isAdmin(req: AuthedRequest): boolean {
+  return req.identity?.isAdmin === true;
 }

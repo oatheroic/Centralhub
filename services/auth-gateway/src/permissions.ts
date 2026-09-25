@@ -32,6 +32,25 @@ export type PermissionMatrix = {
   permissions: Record<string, Record<string, PermissionSet>>;
 };
 
+// Which users have any access at all to one app — the scoping set for a
+// local admin's view of the user directory (see requireAppAdmin()). A local
+// admin of "engineering" has no business enumerating the whole company, and
+// does not need to: a role override for someone with no permission on the
+// app is inert anyway, since GET /data-token refuses a caller without
+// `read` before any role code is even consulted. So "can access this app"
+// is both the privacy boundary and the semantically correct candidate list.
+//
+// Mirrors countAppUsage()'s rule that an all-false row is not a grant — a
+// user whose every verb was unchecked is not "a user of this app".
+export async function listUserSubsWithAppAccess(appId: string): Promise<Set<string>> {
+  const result = await pool.query<{ user_sub: string }>(
+    `SELECT user_sub FROM app_permissions
+      WHERE app_id = $1 AND (can_read OR can_write OR can_edit OR can_delete)`,
+    [appId],
+  );
+  return new Set(result.rows.map((row) => row.user_sub));
+}
+
 export async function getMatrix(): Promise<PermissionMatrix> {
   const users = await listUsers();
   const knownAppIds = await listKnownAppIds();

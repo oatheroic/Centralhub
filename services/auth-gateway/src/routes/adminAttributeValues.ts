@@ -1,5 +1,7 @@
 import { Router, type Response } from "express";
-import { requireSession, requireAdmin, type AuthedRequest } from "../middleware/requireAdmin.js";
+import {
+  requireSession, requireAdmin, requireAppAdmin, appIdFromQuery, type AuthedRequest,
+} from "../middleware/requireAdmin.js";
 import {
   listAttributeValues,
   addAttributeValue,
@@ -29,10 +31,20 @@ function checkKind(kind: string, res: Response): kind is AttributeKind {
   return true;
 }
 
+// READ is open to a local app admin too (with ?app=<id>): an app's own
+// role-rules panel renders its department/position/job-level dropdowns from
+// this list, so without it every criteria picker comes up empty. The values
+// are a shared corporate vocabulary, not per-app data, so there is nothing
+// to narrow by scope — a local admin sees the same list.
+//
+// WRITES below stay platform-only (plain requireAdmin): adding, renaming or
+// retiring a value changes the vocabulary *every* app matches against, and
+// a rename cascades into every other app's existing rules. That is a
+// platform-wide act however local the admin making it.
 adminAttributeValuesRouter.get(
   "/admin/attribute-values/:kind",
   requireSession,
-  requireAdmin,
+  requireAppAdmin(appIdFromQuery),
   async (req, res) => {
     const kind = req.params.kind as string;
     if (!checkKind(kind, res)) return;

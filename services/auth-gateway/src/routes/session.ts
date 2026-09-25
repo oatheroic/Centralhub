@@ -3,7 +3,7 @@ import { SESSION_COOKIE, verifySession, type SessionClaims } from "../session.js
 import { getPermission, type PermissionSet } from "../permissions.js";
 import { isRevoked } from "../revocation.js";
 import { getRoles, hasRole } from "../roles.js";
-import { getUserAttributes } from "../attributes.js";
+import { getUserAttributes, resolveRoleCode, isAppAdmin } from "../attributes.js";
 
 const VERBS: (keyof PermissionSet)[] = ["read", "write", "edit", "delete"];
 
@@ -190,11 +190,18 @@ sessionRouter.get("/session/context", async (req, res) => {
     return;
   }
   try {
-    const [roles, attrs, permissions] = await Promise.all([
+    const [roles, attrs, permissions, roleCode] = await Promise.all([
       getRoles(claims.sub),
       getUserAttributes(claims.sub),
       getPermission(claims.sub, appId),
+      resolveRoleCode(claims.sub, appId),
     ]);
+    // The native-gate counterpart of the minted JWT's `is_admin` claim (see
+    // routes/dataToken.ts) — same meaning, same two ways in, so a
+    // first-party backend gates admin-only behaviour on exactly what a
+    // minted-JWT app's RLS does, rather than re-deriving it from `roles`
+    // (which only ever sees the platform half) or from a CRUD verb.
+    const isAdmin = await isAppAdmin(claims.sub, appId, roleCode);
     res.json({
       sub: claims.sub,
       name: claims.name,
@@ -203,6 +210,8 @@ sessionRouter.get("/session/context", async (req, res) => {
       department: attrs?.department ?? null,
       position: attrs?.position ?? null,
       jobLevel: attrs?.jobLevel ?? null,
+      roleCode,
+      isAdmin,
       permissions,
     });
   } catch (err) {

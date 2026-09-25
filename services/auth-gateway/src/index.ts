@@ -3,7 +3,7 @@ import cookieParser from "cookie-parser";
 import { config } from "./config.js";
 import { migrate } from "./db.js";
 import { seedDevPermissions } from "./permissions.js";
-import { seedDevAttributes } from "./attributes.js";
+import { seedDevAttributes, warnOnAdminGrantingRules } from "./attributes.js";
 import { startRoleSyncPoller } from "./roleSyncPoller.js";
 import { loginRouter } from "./routes/login.js";
 import { callbackRouter } from "./routes/callback.js";
@@ -65,6 +65,10 @@ async function start() {
   // the gateway from serving real login traffic in the meantime.
   void seedDevPermissions();
   void seedDevAttributes();
+  // Cleanup prompt for rules that predate the "admin is override-only"
+  // restriction — they are already ignored when resolving a role, so this
+  // only surfaces them for deletion. Not awaited, never fatal.
+  void warnOnAdminGrantingRules();
   // Runs independently of login: shrinks the console-role-change gap from
   // "needs a manual force-logout" to "self-corrects within one interval" —
   // see roleSyncPoller.ts and README §8/§13.

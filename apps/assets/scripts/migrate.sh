@@ -1,8 +1,9 @@
 #!/bin/sh
 # One-shot migration runner for assets-db. Two phases, in order:
 #
-# 1. Apply 20260707000000_schema.sql and 20260707000001_rls.sql — every
-#    statement in both is idempotent (IF NOT EXISTS / OR REPLACE / DROP
+# 1. Apply 20260707000000_schema.sql, 20260707000001_rls.sql, and
+#    20260924000000_platform_admin.sql — every statement in all three is
+#    idempotent (IF NOT EXISTS / OR REPLACE / DROP
 #    POLICY IF EXISTS+CREATE / ON CONFLICT), so they're simply re-applied on
 #    every container start; no "is this already migrated" check needed.
 # 2. Wait for storage-assets to report healthy, then apply
@@ -26,6 +27,9 @@ until pg_isready -q; do sleep 2; done
 echo "assets-migrate: applying schema + RLS..."
 psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/20260707000000_schema.sql"
 psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/20260707000001_rls.sql"
+# Must run after 20260707000001_rls.sql: grants EXECUTE to the
+# assets_authenticated role that file creates.
+psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/20260924000000_platform_admin.sql"
 
 echo "assets-migrate: waiting for storage-assets..."
 until wget -q -O /dev/null "$STORAGE_HEALTH_URL"; do sleep 2; done

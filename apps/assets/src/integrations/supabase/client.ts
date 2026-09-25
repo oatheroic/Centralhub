@@ -14,13 +14,19 @@ const SUPABASE_PLACEHOLDER_KEY = "centralhub-self-hosted";
 
 let dataToken: string | null = null;
 let resolvedRoleCode: string | null = null;
+let currentUserSub: string | null = null;
 let dataTokenPromise: Promise<string | null> | null = null;
 
 async function fetchDataToken(): Promise<string | null> {
   const res = await fetch("/auth/data-token?app=assets", { credentials: "same-origin" });
   if (!res.ok) return null;
-  const body = (await res.json()) as { token: string; role_code: string | null };
+  const body = (await res.json()) as {
+    token: string;
+    role_code: string | null;
+    sub?: string | null;
+  };
   resolvedRoleCode = body.role_code;
+  currentUserSub = body.sub ?? null;
   return body.token;
 }
 
@@ -43,6 +49,15 @@ async function getDataToken(): Promise<string | null> {
 export async function getResolvedRoleCode(): Promise<string | null> {
   await getDataToken();
   return resolvedRoleCode;
+}
+
+// This user's own CentralHub subject id, from the same cached
+// /auth/data-token response. Used by RoleRulesPanel's overrides section to
+// keep the caller out of its own user picker — the same self-lockout
+// guard apps/engineering gets from profile.id.
+export async function getCurrentUserSub(): Promise<string | null> {
+  await getDataToken();
+  return currentUserSub;
 }
 
 function createSupabaseClient() {

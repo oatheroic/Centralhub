@@ -52,18 +52,41 @@ export default function App() {
             passWhitelist(s.step),
         );
     const canReport =
-      info.is_admin ||
-      info.step_access?.includes(2) ||
-      info.step_access?.includes(3);
+      info.is_admin || info.step_access?.includes(2) || info.step_access?.includes(3);
     const extras: typeof ALL_STEPS = [];
     if (canReport) {
-      extras.push({ value: "report", step: 90, label: "📊 รายงานบันทึกภายใน", Comp: InternalReport });
+      extras.push({
+        value: "report",
+        step: 90,
+        label: "📊 รายงานบันทึกภายใน",
+        Comp: InternalReport,
+      });
     }
     if (info.is_admin) {
-      extras.push({ value: "admin", step: 99, label: "⚙️ จัดการผู้ใช้งาน", Comp: PasswordManagerPanel });
-      extras.push({ value: "person_pw", step: 98, label: "🔐 รหัสรับทรัพย์สินรายบุคคล", Comp: PersonReceivePasswordPanel });
-      extras.push({ value: "dept_fix", step: 97, label: "🏢 แก้ไขแผนกผู้รับผิดชอบ", Comp: DepartmentFixPanel });
-      extras.push({ value: "role_rules", step: 96, label: "🔗 กฎเชื่อมสิทธิ์", Comp: RoleRulesPanel });
+      extras.push({
+        value: "admin",
+        step: 99,
+        label: "⚙️ จัดการผู้ใช้งาน",
+        Comp: PasswordManagerPanel,
+      });
+      extras.push({
+        value: "person_pw",
+        step: 98,
+        label: "🔐 รหัสรับทรัพย์สินรายบุคคล",
+        Comp: PersonReceivePasswordPanel,
+      });
+      extras.push({
+        value: "dept_fix",
+        step: 97,
+        label: "🏢 แก้ไขแผนกผู้รับผิดชอบ",
+        Comp: DepartmentFixPanel,
+      });
+      extras.push({
+        value: "role_rules",
+        step: 96,
+        label: "🔗 กฎเชื่อมสิทธิ์",
+        Comp: RoleRulesPanel,
+      });
     }
     return [...base, ...extras];
   }, [info]);
@@ -105,7 +128,6 @@ export default function App() {
     // setCurrentRole below dispatches a "role-changed" event that updates
     // `info`, which would otherwise re-trigger this effect on its own
     // write and loop.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   if (!autoLoginChecked) {
@@ -131,24 +153,28 @@ export default function App() {
     <>
       <AssetsNav />
       <div className="min-h-screen bg-muted/30 py-8">
-        <div className="max-w-4xl mx-auto px-6 mb-4 flex justify-end">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 mb-4 flex justify-end">
           <RoleSwitcher />
         </div>
         {allowedSteps.length === 0 ? (
-          <div className="max-w-4xl mx-auto px-6">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6">
             <div className="bg-card border rounded-lg p-6 text-center text-muted-foreground">
               ผู้ใช้นี้ยังไม่มีสิทธิ์เข้าถึงขั้นตอนใด ๆ กรุณาติดต่อผู้ดูแลระบบ
             </div>
           </div>
         ) : (
-          <Tabs defaultValue={allowedSteps[0].value} className="max-w-4xl mx-auto px-6">
+          <Tabs defaultValue={allowedSteps[0].value} className="max-w-7xl mx-auto px-4 sm:px-6">
             <TabsList className="mb-4 flex-wrap h-auto">
               {allowedSteps.map((s) => (
-                <TabsTrigger key={s.value} value={s.value}>{s.label}</TabsTrigger>
+                <TabsTrigger key={s.value} value={s.value}>
+                  {s.label}
+                </TabsTrigger>
               ))}
             </TabsList>
             {allowedSteps.map((s) => (
-              <TabsContent key={s.value} value={s.value}><s.Comp /></TabsContent>
+              <TabsContent key={s.value} value={s.value}>
+                <s.Comp />
+              </TabsContent>
             ))}
           </Tabs>
         )}

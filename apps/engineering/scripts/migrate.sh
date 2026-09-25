@@ -5,11 +5,11 @@
 #    20260717000000_dept_user_overrides.sql, 20260717000001_audit_log.sql,
 #    20260915000000_repair_scheduling.sql, 20260915000001_profile_username.sql,
 #    20260915000002_group_override_sync.sql, 20260915000003_job_history_kind.sql,
-#    and 20260915000004_dev_seed_aliases.sql — every statement across all nine
-#    is idempotent (IF NOT EXISTS /
-#    OR REPLACE / DROP POLICY IF EXISTS+CREATE / ON CONFLICT), so they're
-#    simply re-applied on every container start; no "is this already
-#    migrated" check needed.
+#    20260915000004_dev_seed_aliases.sql, and
+#    20260924000000_platform_admin.sql — every statement across all ten is
+#    idempotent (IF NOT EXISTS / OR REPLACE / DROP POLICY IF EXISTS+CREATE
+#    / ON CONFLICT), so they're simply re-applied on every container start;
+#    no "is this already migrated" check needed.
 # 2. Wait for storage-engineering to report healthy, then apply
 #    20260716000002_storage.sql — split out because the `storage` schema
 #    it references doesn't exist until storage-engineering (supabase/
@@ -38,6 +38,9 @@ psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/20260915000001_profile_username.s
 psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/20260915000002_group_override_sync.sql"
 psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/20260915000003_job_history_kind.sql"
 psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/20260915000004_dev_seed_aliases.sql"
+# Must run after 20260716000000_schema.sql: re-defines has_role() and
+# is_engineering_user() to honour the platform-admin `is_admin` claim.
+psql -v ON_ERROR_STOP=1 -q -f "$MIGRATIONS_DIR/20260924000000_platform_admin.sql"
 
 echo "engineering-migrate: waiting for storage-engineering..."
 until wget -q -O /dev/null "$STORAGE_HEALTH_URL"; do sleep 2; done

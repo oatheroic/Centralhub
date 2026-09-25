@@ -433,7 +433,9 @@ function AttrBadges({ attrs }: { attrs?: CentralAttrs }) {
   );
 }
 
-// NOTE: /auth/admin/users(/attributes) require CentralHub's own Keycloak
+// NOTE: /auth/admin/users(/attributes) accept a local admin of this app as
+// well as a Keycloak realm admin, via the ?app=engineering param below —
+// without it they fall back to requiring CentralHub's own Keycloak
 // "admin" realm role (see requireAdmin.ts), not this app's resolved
 // role_code — the two happen to coincide for dev-admin (both a realm admin
 // and rule-resolved to engineering's "admin"), but aren't guaranteed to in
@@ -452,8 +454,8 @@ function UsersTab({ users }: { users: UserRow[] }) {
   useEffect(() => {
     (async () => {
       const [attrsRes, usersRes, rulesRes, overridesRes] = await Promise.all([
-        fetch("/auth/admin/users/attributes", { credentials: "same-origin" }),
-        fetch("/auth/admin/users", { credentials: "same-origin" }),
+        fetch("/auth/admin/users/attributes?app=engineering", { credentials: "same-origin" }),
+        fetch("/auth/admin/users?app=engineering", { credentials: "same-origin" }),
         fetch("/auth/admin/apps/engineering/role-rules", { credentials: "same-origin" }),
         fetch("/auth/admin/apps/engineering/role-overrides", { credentials: "same-origin" }),
       ]);

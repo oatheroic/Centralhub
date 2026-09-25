@@ -6,6 +6,7 @@
 //   createPool(), connectWithRetry(), applyMigrations()
 //   createAuth()                  authenticate + requireVerb middleware
 //   hasVerb()                     in-handler conditional permission check
+//   isAdmin()                     in-handler "admin of this app" check
 //   createNotifier()              app-originated platform notifications
 //   healthRouter                  GET /health
 //
@@ -23,6 +24,7 @@ export {
 export {
   createAuth,
   hasVerb,
+  isAdmin,
   type AuthOptions,
   type AuthedRequest,
   type Identity,

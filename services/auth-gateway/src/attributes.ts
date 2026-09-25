@@ -189,11 +189,71 @@ export class RoleRuleExistsError extends Error {
   }
 }
 
+// Admin is deliberately not expressible as an attribute rule — it is only
+// ever granted per user, by name, via app_role_overrides.
+//
+// Why: a rule is a bulk grant over whoever currently matches a
+// department/position/job-level combination, and that set changes on its
+// own as HR data changes. "position = Manager -> admin" silently promotes
+// every future Manager, and the self-override guard (adminRoleOverrides.ts
+// refuses to let an admin retarget their own account) is trivially routed
+// around by writing a rule that happens to match yourself. Restricting
+// admin to overrides makes every admin grant an explicit, named, audited
+// act with exactly one subject.
+//
+// This binds platform admins too, not just local ones. That is intended:
+// the reason is about the grant's *shape*, not the granter's rank, and a
+// platform admin who wants a population promoted can still do it, one
+// named override at a time.
+export class AdminRoleRuleForbiddenError extends Error {
+  constructor(public readonly adminRoleCode: string) {
+    super(
+      `"${adminRoleCode}" is this app's admin role and cannot be granted by an attribute rule — ` +
+        "assign it per user with a role override instead",
+    );
+  }
+}
+
+// Logged once at startup rather than failing: a pre-existing admin-granting
+// rule is already inert at resolve time (see resolveRoleCode()), so this is
+// a cleanup prompt, not an error path. Non-fatal by construction — a
+// warning about stale data must never stop the gateway from booting.
+export async function warnOnAdminGrantingRules(): Promise<void> {
+  try {
+    const result = await pool.query<{ app_id: string; role_code: string; count: string }>(
+      `SELECT r.app_id, r.role_code, COUNT(*)::text AS count
+         FROM app_role_rules r
+         JOIN apps a ON a.id = r.app_id
+        WHERE a.admin_role_code IS NOT NULL AND r.role_code = a.admin_role_code
+        GROUP BY r.app_id, r.role_code`,
+    );
+    for (const row of result.rows) {
+      console.warn(
+        `auth-gateway: ${row.count} attribute rule(s) on app "${row.app_id}" grant its admin role ` +
+          `"${row.role_code}". These are IGNORED when resolving a role (admin is override-only) — ` +
+          "delete them in the app's role-rules panel to stop them showing as active rules.",
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `auth-gateway: could not check for admin-granting role rules (non-fatal): ${(err as Error).message}`,
+    );
+  }
+}
+
 export async function createAppRoleRule(
   appId: string,
   roleCode: string,
   criteria: { department: string | null; position: string | null; jobLevel: string | null },
 ): Promise<AppRoleRule> {
+  // Enforced in the data layer, not only in the route, so every caller
+  // (route, seed, any future one) is bound by it — resolveRoleCode() skips
+  // such a rule anyway, so accepting the write would only ever create a
+  // row that silently does nothing.
+  const adminRoleCode = await adminRoleCodeFor(appId);
+  if (adminRoleCode && roleCode === adminRoleCode) {
+    throw new AdminRoleRuleForbiddenError(adminRoleCode);
+  }
   try {
     const result = await pool.query<{
       id: number;
@@ -288,6 +348,14 @@ export async function resolveRoleCode(userSub: string, appId: string): Promise<s
 
   let best: { rule: AppRoleRule; specificity: number } | null = null;
   for (const rule of rules) {
+    // Admin is never grantable by attribute match — see
+    // ADMIN_RULES_FORBIDDEN below. Enforced here, not only at write time,
+    // so a rule that predates the restriction (the old dev seeds created
+    // exactly one: position=Manager -> the app's admin code) cannot keep
+    // granting admin to a whole population. Such a row is inert rather
+    // than deleted; auth-gateway logs it at startup (see
+    // warnOnAdminGrantingRules()) so an admin can clear it deliberately.
+    if (guaranteedAdminRoleCode && rule.roleCode === guaranteedAdminRoleCode) continue;
     const criteria: [string | null, string][] = [
       [rule.department, attrs.department],
       [rule.position, attrs.position],
@@ -301,6 +369,44 @@ export async function resolveRoleCode(userSub: string, appId: string): Promise<s
     }
   }
   return best?.rule.roleCode ?? null;
+}
+
+// "Is this user an admin *inside* appId" — the single notion every app
+// consumes (as the `is_admin` token claim / context field). Two ways in,
+// deliberately indistinguishable to the app:
+//
+//   1. A CentralHub Keycloak realm admin. Unconditional and not per-app
+//      configurable — this is the platform-wide guarantee, so it holds even
+//      for an app with no admin_role_code and no role vocabulary at all
+//      (marketing/finance/resource-booking today). Note this does NOT
+//      depend on adminRoleCodeFor() the way resolveRoleCode()'s own admin
+//      branch does; that branch only decides which *role code* a platform
+//      admin resolves to, which is a separate question from whether they
+//      are an admin.
+//   2. A normal user whose resolved role code (override or attribute rule)
+//      equals the app's own admin role code — the "local admin" a platform
+//      admin promotes. Impossible for an app with admin_role_code unset,
+//      since there is then no code that means "admin" here.
+//
+// Nothing is written anywhere as a side effect: admin-ness is re-derived
+// per request, so revoking the realm role in Keycloak (or deleting the
+// override) takes effect on the next token mint with no cleanup step and no
+// stale local grant left behind.
+//
+// `resolvedRoleCode` lets a caller that has already run resolveRoleCode()
+// for this user/app (every mint site does) pass it in rather than pay for a
+// second resolution; omit it and this resolves on its own.
+export async function isAppAdmin(
+  userSub: string,
+  appId: string,
+  resolvedRoleCode?: string | null,
+): Promise<boolean> {
+  if (await hasRole(userSub, "admin")) return true;
+  const adminRoleCode = await adminRoleCodeFor(appId);
+  if (!adminRoleCode) return false;
+  const roleCode =
+    resolvedRoleCode === undefined ? await resolveRoleCode(userSub, appId) : resolvedRoleCode;
+  return roleCode === adminRoleCode;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -383,17 +489,21 @@ export async function seedDevAttributes(maxAttempts = 45, delayMs = 2000): Promi
       // fresh stack a working demo, not fight an admin who's since
       // customized it -- so once an app has any rule of its own, this
       // never inserts into it again, seeded or not.
+      // No ADM01 (admin) rule here any more: admin is override-only (see
+      // AdminRoleRuleForbiddenError), and createAppRoleRule() would now
+      // reject it. Nothing is lost — dev-admin is a Keycloak realm admin,
+      // so resolveRoleCode()'s platform branch returns ADM01 for them
+      // regardless of any rule.
       await seedRoleRulesIfEmpty("assets", [
-        { roleCode: "ADM01", department: null, position: "Manager", jobLevel: null },
         { roleCode: "REQ01", department: null, position: "Staff", jobLevel: null },
       ]);
-      // apps/engineering demo rules — dev-admin (Manager) resolves to its
-      // "admin" role; dev-user (any department, Staff/Junior) resolves to
-      // "repairer" via a department-wildcard rule, the exact shape this
-      // ingestion's rule model was designed around (see README's
-      // engineering ingestion section).
+      // apps/engineering demo rule — dev-user (any department,
+      // Staff/Junior) resolves to "repairer" via a department-wildcard
+      // rule, the exact shape this ingestion's rule model was designed
+      // around (see README's engineering ingestion section). dev-admin's
+      // former "admin" rule is gone for the same reason as assets' ADM01
+      // above; they still resolve to "admin" as a realm admin.
       await seedRoleRulesIfEmpty("engineering", [
-        { roleCode: "admin", department: null, position: "Manager", jobLevel: null },
         { roleCode: "repairer", department: null, position: "Staff", jobLevel: "Junior" },
       ]);
       // apps/engineering live-test cast (README §10g): one account per role,

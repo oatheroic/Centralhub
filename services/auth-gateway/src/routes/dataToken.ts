@@ -3,7 +3,7 @@ import { SignJWT } from "jose";
 import { config } from "../config.js";
 import { SESSION_COOKIE, verifySession } from "../session.js";
 import { getPermission } from "../permissions.js";
-import { resolveRoleCode, getUserAttributes } from "../attributes.js";
+import { resolveRoleCode, getUserAttributes, isAppAdmin } from "../attributes.js";
 import { isRevoked } from "../revocation.js";
 
 // Mints a short-lived JWT for a third-party app's self-hosted data layer
@@ -66,6 +66,14 @@ dataTokenRouter.get("/data-token", async (req, res) => {
     // translation, not this service. Harmless extra claim for apps that
     // don't read it.
     const attrs = await getUserAttributes(claims.sub);
+    // Whether the caller is an admin *of this app* — a CentralHub realm
+    // admin (always, for every app, with no per-app config) or a user
+    // promoted to this app's own admin role code. See isAppAdmin(). Apps
+    // deliberately cannot tell the two apart: there is one local notion of
+    // "admin here", and a platform admin simply always satisfies it.
+    // Always present (never conditionally spread like the claims below) so
+    // an app's RLS can read it as a plain boolean without a null branch.
+    const isAdmin = await isAppAdmin(claims.sub, appId, roleCode);
     const jwt = await new SignJWT({
       role: `${appId}_authenticated`,
       sub: claims.sub,
@@ -80,6 +88,7 @@ dataTokenRouter.get("/data-token", async (req, res) => {
       // as "who filed this job"). Absent only on a session minted before
       // this claim existed.
       ...(claims.username ? { username: claims.username } : {}),
+      is_admin: isAdmin,
       ...(roleCode ? { role_code: roleCode } : {}),
       ...(attrs?.department ? { dept_name: attrs.department } : {}),
     })
@@ -87,7 +96,18 @@ dataTokenRouter.get("/data-token", async (req, res) => {
       .setIssuedAt()
       .setExpirationTime("15m")
       .sign(dataJwtSecret);
-    res.json({ token: jwt, role_code: roleCode, dept_name: attrs?.department ?? null });
+    res.json({
+      token: jwt,
+      // The caller's own CentralHub subject id. Already inside the token
+      // above, but returned unpacked so an app doesn't have to decode a JWT
+      // just to answer "which of these rows is me?" — apps/assets's role
+      // overrides panel uses it to exclude the caller from its own user
+      // picker, the way apps/engineering uses profile.id.
+      sub: claims.sub,
+      role_code: roleCode,
+      is_admin: isAdmin,
+      dept_name: attrs?.department ?? null,
+    });
   } catch (err) {
     console.error("auth-gateway: data-token minting failed, failing closed", err);
     res.status(503).json({ error: "data token unavailable" });

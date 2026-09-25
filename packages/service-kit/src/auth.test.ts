@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NextFunction, Response } from "express";
-import { createAuth, hasVerb, type AuthedRequest } from "./auth.js";
+import { createAuth, hasVerb, isAdmin, type AuthedRequest } from "./auth.js";
 
 const CONTEXT = {
   sub: "u1",
@@ -10,6 +10,8 @@ const CONTEXT = {
   department: "Marketing",
   position: null,
   jobLevel: null,
+  roleCode: null,
+  isAdmin: false,
   permissions: { read: true, write: true, edit: false, delete: false },
 };
 
@@ -66,6 +68,8 @@ describe("createAuth().authenticate", () => {
       department: "Marketing",
       position: null,
       jobLevel: null,
+      roleCode: null,
+      isAdmin: false,
     });
     expect(req.permissions).toEqual(CONTEXT.permissions);
   });
@@ -130,5 +134,54 @@ describe("requireVerb / hasVerb", () => {
     const req = { headers: {}, permissions: CONTEXT.permissions } as unknown as AuthedRequest;
     expect(hasVerb(req, "write")).toBe(true);
     expect(hasVerb(req, "edit")).toBe(false);
+  });
+});
+
+describe("isAdmin", () => {
+  const fetchMock = vi.fn();
+  const { authenticate } = createAuth({ appId: "demo", authGatewayUrl: "http://auth-gateway:4100" });
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    fetchMock.mockReset();
+  });
+
+  it("fails closed when authenticate never ran", () => {
+    expect(isAdmin(makeReq())).toBe(false);
+  });
+
+  it("is carried through from /session/context, independently of the verbs", async () => {
+    // Deliberately read-only: admin-ness is its own signal, not something a
+    // service should infer from holding write/edit/delete.
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        ...CONTEXT,
+        isAdmin: true,
+        roleCode: "admin",
+        permissions: { read: true, write: false, edit: false, delete: false },
+      }),
+    );
+    const req = makeReq("chub_session=abc");
+    await authenticate(req, makeRes(), vi.fn());
+    expect(isAdmin(req)).toBe(true);
+    expect(req.identity?.roleCode).toBe("admin");
+    expect(hasVerb(req, "delete")).toBe(false);
+  });
+
+  it("is false for an ordinary user who holds every verb", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        ...CONTEXT,
+        permissions: { read: true, write: true, edit: true, delete: true },
+      }),
+    );
+    const req = makeReq("chub_session=abc");
+    await authenticate(req, makeRes(), vi.fn());
+    expect(isAdmin(req)).toBe(false);
   });
 });
